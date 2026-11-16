@@ -1,2 +1,0 @@
-# krakozhia
-Enterprise RAG system
