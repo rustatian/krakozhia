@@ -68,6 +68,8 @@ type fakeAWS struct {
 	failDelete bool
 	failQuery  bool
 	hits       []hit // the answer to a QueryVectors request
+	// answers holds the answer for one query form and one text. The key is "<text|vector|hybrid>:<query text>".
+	answers map[string][]hit
 
 	embeds  []embedCall
 	puts    []putCall
@@ -125,8 +127,22 @@ func (f *fakeAWS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			reject(w)
 			return
 		}
+		form, text := "hybrid", ""
+		if len(call.QueryTexts) > 0 {
+			text = call.QueryTexts[0].Text
+		} else {
+			// A vector query holds no text. Its text is the input of the last embedding request.
+			form, text = "vector", f.embeds[len(f.embeds)-1].InputText
+		}
+		if len(call.QueryVector.Float32) == 0 {
+			form = "text"
+		}
+		hits := f.hits
+		if answer, ok := f.answers[form+":"+text]; ok {
+			hits = answer
+		}
 		vectors := []map[string]any{}
-		for _, h := range f.hits {
+		for _, h := range hits {
 			v := map[string]any{"key": h.ID}
 			scores := map[string]any{}
 			if h.Distance != nil {

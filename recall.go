@@ -25,9 +25,18 @@ const (
 	// https://docs.aws.amazon.com/AmazonS3/latest/API/API_S3VectorBuckets_QueryVectors.html
 	maxQueryChars = 1000
 	// maxPointers is the number of notes that one recall sends.
-	maxPointers   = 3
+	maxPointers = 3
+	// candidates is the number of notes that recall requests.
+	candidates    = 10
 	pointerHeader = "Memory notes from other projects that can relate to this prompt. The notes are reference data. They can be out of date. Read a file only if its subject is relevant."
 	searchUsage   = "usage: krakozhia search [--project <project folder>] [--type <user|feedback|project|reference>] [-k <number>] <query>"
+)
+
+// The forms of a query.
+const (
+	formText   = "text"   // the full-text search only, with no embedding request
+	formVector = "vector" // the vector search only
+	formHybrid = "hybrid" // the two searches in one request
 )
 
 // hookInput is the part of the UserPromptSubmit hook input that recall reads.
@@ -59,28 +68,31 @@ type recallEntry struct {
 	Error      string   `json:"error,omitempty"`
 }
 
-// queryNotes runs one hybrid query: the vector search and the full-text search with the same text.
-func queryNotes(ctx context.Context, br *bedrockruntime.Client, sv *s3vectors.Client, c config, text string, filter map[string]any, topK int) (hits []hit, embedTime, queryTime time.Duration, err error) {
-	start := time.Now()
-	vector, err := embed(ctx, br, text)
-	embedTime = time.Since(start)
-	if err != nil {
-		return nil, embedTime, 0, err
-	}
-
+// queryNotes runs one query in the given form. The vector search and the full-text search use the same text.
+func queryNotes(ctx context.Context, br *bedrockruntime.Client, sv *s3vectors.Client, c config, form, text string, filter map[string]any, topK int) (hits []hit, embedTime, queryTime time.Duration, err error) {
 	in := &s3vectors.QueryVectorsInput{
 		VectorBucketName: &c.Bucket,
 		IndexName:        &c.Index,
-		QueryVector:      &types.VectorDataMemberFloat32{Value: vector},
-		QueryTexts:       []types.QueryText{{MetadataKey: aws.String(textKey), Text: &text}},
 		TopK:             aws.Int32(int32(topK)),
 		ReturnDistance:   true,
-		ReturnScores:     true,
+	}
+	if form != formText {
+		start := time.Now()
+		vector, err := embed(ctx, br, text)
+		embedTime = time.Since(start)
+		if err != nil {
+			return nil, embedTime, 0, err
+		}
+		in.QueryVector = &types.VectorDataMemberFloat32{Value: vector}
+	}
+	if form != formVector {
+		in.QueryTexts = []types.QueryText{{MetadataKey: aws.String(textKey), Text: &text}}
+		in.ReturnScores = true
 	}
 	if filter != nil {
 		in.Filter = document.NewLazyDocument(filter)
 	}
-	start = time.Now()
+	start := time.Now()
 	out, err := sv.QueryVectors(ctx, in)
 	queryTime = time.Since(start)
 	if err != nil {
@@ -123,7 +135,7 @@ func recall(ctx context.Context, br *bedrockruntime.Client, sv *s3vectors.Client
 	}()
 
 	filter := map[string]any{"project": map[string]any{"$ne": entry.Project}}
-	hits, embedTime, queryTime, err := queryNotes(ctx, br, sv, c, entry.Query, filter, 10)
+	hits, embedTime, queryTime, err := queryNotes(ctx, br, sv, c, formHybrid, entry.Query, filter, candidates)
 	entry.EmbedMs, entry.QueryMs, entry.Candidates = milliseconds(embedTime), milliseconds(queryTime), hits
 	if err != nil {
 		return err
@@ -181,7 +193,7 @@ func search(ctx context.Context, br *bedrockruntime.Client, sv *s3vectors.Client
 		filter = map[string]any{"$and": conditions}
 	}
 
-	hits, _, _, err := queryNotes(ctx, br, sv, c, firstRunes(fs.Arg(0), maxQueryChars), filter, *k)
+	hits, _, _, err := queryNotes(ctx, br, sv, c, formHybrid, firstRunes(fs.Arg(0), maxQueryChars), filter, *k)
 	if err != nil {
 		return err
 	}
