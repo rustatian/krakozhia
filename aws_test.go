@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 type embedCall struct {
@@ -39,16 +41,39 @@ type deleteCall struct {
 	Keys             []string `json:"keys"`
 }
 
+type queryText struct {
+	MetadataKey string `json:"metadataKey"`
+	Text        string `json:"text"`
+}
+
+type queryCall struct {
+	VectorBucketName string `json:"vectorBucketName"`
+	IndexName        string `json:"indexName"`
+	QueryVector      struct {
+		Float32 []float32 `json:"float32"`
+	} `json:"queryVector"`
+	QueryTexts     []queryText    `json:"queryTexts"`
+	Filter         map[string]any `json:"filter"`
+	TopK           int            `json:"topK"`
+	ReturnDistance bool           `json:"returnDistance"`
+	ReturnScores   bool           `json:"returnScores"`
+	ReturnMetadata bool           `json:"returnMetadata"`
+}
+
 // fakeAWS answers the Bedrock and S3 Vectors requests of the SDK clients and records them.
 type fakeAWS struct {
-	rejectText string // the embedding model rejects this input text
+	rejectText string        // the embedding model rejects this input text
+	delay      time.Duration // wait before the answer to an embedding request
 	failPut    bool
 	failDelete bool
+	failQuery  bool
+	hits       []hit // the answer to a QueryVectors request
 
 	embeds  []embedCall
 	puts    []putCall
 	deletes []deleteCall
 	creates []map[string]any
+	queries []queryCall
 }
 
 func (f *fakeAWS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -59,6 +84,11 @@ func (f *fakeAWS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		call := embedCall{Path: r.URL.Path}
 		_ = dec.Decode(&call)
 		f.embeds = append(f.embeds, call)
+		select {
+		case <-time.After(f.delay):
+		case <-r.Context().Done():
+			return
+		}
 		if call.InputText == f.rejectText {
 			reject(w)
 			return
@@ -87,6 +117,29 @@ func (f *fakeAWS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = dec.Decode(&call)
 		f.creates = append(f.creates, call)
 		fmt.Fprint(w, "{}")
+	case r.URL.Path == "/QueryVectors":
+		var call queryCall
+		_ = dec.Decode(&call)
+		f.queries = append(f.queries, call)
+		if f.failQuery {
+			reject(w)
+			return
+		}
+		vectors := []map[string]any{}
+		for _, h := range f.hits {
+			v := map[string]any{"key": h.ID}
+			scores := map[string]any{}
+			if h.Distance != nil {
+				v["distance"] = *h.Distance
+				scores["vectorDistance"] = *h.Distance
+			}
+			if h.BM25 != nil {
+				scores["bm25Scores"] = []map[string]any{{"metadataKey": "text", "score": *h.BM25}}
+			}
+			v["scores"] = scores
+			vectors = append(vectors, v)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"vectors": vectors, "distanceMetric": "cosine"})
 	default:
 		http.NotFound(w, r)
 	}
@@ -361,22 +414,19 @@ func TestRunSync(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	const valid = "---\nname: one\ndescription: A fact\nmetadata:\n  type: project\n---\n\nBody.\n"
-	files := map[string]string{
+	writeFiles(t, home, map[string]string{
 		".config/krakozhia/config.json":            `{"region": "eu-central-1", "bucket": "memory"}`,
 		".claude/projects/proj-a/memory/one.md":    valid,
 		".claude/projects/proj-a/memory/broken.md": "# No front matter\n",
-	}
-	for name, content := range files {
-		p := filepath.Join(home, name)
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		".local/state/krakozhia/sessions/old":      "proj-a/one\n",
+		".local/state/krakozhia/sessions/new":      "proj-a/one\n",
+	})
+	eightDaysAgo := time.Now().Add(-8 * 24 * time.Hour)
+	if err := os.Chtimes(filepath.Join(home, ".local/state/krakozhia/sessions/old"), eightDaysAgo, eightDaysAgo); err != nil {
+		t.Fatal(err)
 	}
 
-	err := run([]string{"sync"})
+	err := run([]string{"sync"}, strings.NewReader(""), io.Discard)
 
 	if err == nil || !strings.Contains(err.Error(), "broken.md") {
 		t.Errorf("run: got error %v, want an error that names broken.md", err)
@@ -388,5 +438,27 @@ func TestRunSync(t *testing.T) {
 	want := map[string]string{"proj-a/one": hashText(valid)}
 	if got.Index != "notes-titan-v2-1024" || !maps.Equal(got.Hashes, want) {
 		t.Errorf("manifest: got %+v, want index notes-titan-v2-1024 and hashes %v", got, want)
+	}
+	// sync removes the session files that are older than 7 days.
+	entries, err := os.ReadDir(filepath.Join(home, ".local/state/krakozhia/sessions"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "new" {
+		t.Errorf("session files: got %v, want only the file new", entries)
+	}
+}
+
+// writeFiles writes the files below root. A key is a path relative to root.
+func writeFiles(t *testing.T, root string, files map[string]string) {
+	t.Helper()
+	for name, content := range files {
+		p := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
