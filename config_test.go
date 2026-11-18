@@ -14,13 +14,13 @@ func TestLoadConfig(t *testing.T) {
 	}{
 		{
 			name:    "all fields",
-			content: `{"profile": "krakozhia", "region": "eu-central-1", "bucket": "memory", "index": "notes-other-512"}`,
-			want:    config{Profile: "krakozhia", Region: "eu-central-1", Bucket: "memory", Index: "notes-other-512"},
+			content: `{"profile": "krakozhia", "region": "eu-central-1", "bucket": "memory", "index": "notes-other-512", "max_distance": 0.4, "min_bm25": 6}`,
+			want:    config{Profile: "krakozhia", Region: "eu-central-1", Bucket: "memory", Index: "notes-other-512", MaxDistance: 0.4, MinBM25: 6},
 		},
 		{
-			name:    "no index gives the index of the default model",
+			name:    "only the necessary fields give the default index and the default gate limits",
 			content: `{"region": "eu-central-1", "bucket": "memory"}`,
-			want:    config{Region: "eu-central-1", Bucket: "memory", Index: "notes-titan-v2-1024"},
+			want:    config{Region: "eu-central-1", Bucket: "memory", Index: "notes-titan-v2-1024", MaxDistance: 0.55, MinBM25: 10},
 		},
 	}
 	for _, tt := range tests {

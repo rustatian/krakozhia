@@ -138,15 +138,7 @@ func TestLoadNotes(t *testing.T) {
 		"proj-b/other/ignored.md":  valid,
 		"proj-b/memory/sub/two.md": valid,
 	}
-	for name, content := range files {
-		p := filepath.Join(root, name)
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
+	writeFiles(t, root, files)
 	fileTime := time.Date(2026, 11, 2, 8, 30, 0, 0, time.UTC)
 	if err := os.Chtimes(filepath.Join(root, "proj-a/memory/one.md"), fileTime, fileTime); err != nil {
 		t.Fatal(err)
