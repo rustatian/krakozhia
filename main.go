@@ -28,8 +28,8 @@ func main() {
 }
 
 func run(args []string, stdin io.Reader, stdout io.Writer) error {
-	if len(args) == 0 || !slices.Contains([]string{"init", "sync", "recall", "search"}, args[0]) {
-		return errors.New("usage: krakozhia <init|sync|recall|search>")
+	if len(args) == 0 || !slices.Contains([]string{"init", "sync", "recall", "search", "eval"}, args[0]) {
+		return errors.New("usage: krakozhia <init|sync|recall|search|eval>")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -66,6 +66,8 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 		ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		defer cancel()
 		return recall(ctx, br, sv, c, home, stdin, stdout)
+	case "eval":
+		return eval(ctx, br, sv, c, args[1:], stdout)
 	}
 	return search(ctx, br, sv, c, home, args[1:], stdout)
 }
