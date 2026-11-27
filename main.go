@@ -5,12 +5,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
+	"github.com/rustatian/krakozhia/internal/enrich"
 	"github.com/rustatian/krakozhia/internal/inference"
 	"github.com/rustatian/krakozhia/internal/server"
 	"github.com/rustatian/krakozhia/internal/store"
@@ -83,6 +87,29 @@ func runServe() error {
 		Version:   "0.1.0",
 	})
 
+	workers := 1
+	if raw := os.Getenv("KRAKOZHIA_ENRICH_WORKERS"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 0 {
+			return fmt.Errorf("invalid KRAKOZHIA_ENRICH_WORKERS %q", raw)
+		}
+		workers = n
+	}
+
+	var wg sync.WaitGroup
+	for range workers {
+		w := enrich.New(enrich.Config{
+			Store:     st,
+			Inference: inf,
+			Logger:    slog.Default(),
+		})
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			w.Run(ctx)
+		}()
+	}
+
 	httpSrv := &http.Server{
 		Addr:              listen,
 		Handler:           srv.Handler(),
@@ -100,11 +127,15 @@ func runServe() error {
 
 	select {
 	case err := <-errCh:
+		stop()
+		wg.Wait()
 		return err
 	case <-ctx.Done():
 		shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		return httpSrv.Shutdown(shutCtx)
+		err := httpSrv.Shutdown(shutCtx)
+		wg.Wait()
+		return err
 	}
 }
 

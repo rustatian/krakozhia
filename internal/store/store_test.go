@@ -366,6 +366,22 @@ func TestStoreDocumentsNotesBenchmarksSearchAndJobs(t *testing.T) {
 	if err != nil || gotEnriched.Summary != "Summary text." || !slices.Equal(gotEnriched.Tags, []string{"postgres", "pgvector"}) {
 		t.Fatalf("enriched doc = %+v, %v", gotEnriched, err)
 	}
+	chunks, err := s.ListChunks(ctx, "krakozhia/vector-design")
+	if err != nil || len(chunks) != 1 || chunks[0].ContextPrefix != "Context prefix." {
+		t.Fatalf("ListChunks = %+v, %v", chunks, err)
+	}
+	notes, err := s.ListNotes(ctx, "infra", "", 10)
+	if err != nil || len(notes) != 1 || notes[0].ID != "infra/pgvector-note" {
+		t.Fatalf("ListNotes = %+v, %v", notes, err)
+	}
+	projects, err := s.ListProjects(ctx)
+	if err != nil || !slices.Equal(projects, []string{"infra", "krakozhia"}) {
+		t.Fatalf("ListProjects = %v, %v", projects, err)
+	}
+	links, err := s.ListRecordLinks(ctx, "note", "infra/pgvector-note")
+	if err != nil || len(links) != 1 || links[0].Relation != "supersedes" {
+		t.Fatalf("ListRecordLinks = %+v, %v", links, err)
+	}
 
 	if err := s.DeleteNotes(ctx, []string{"infra/pgvector-note"}); err != nil {
 		t.Fatalf("DeleteNotes: %v", err)

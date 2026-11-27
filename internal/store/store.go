@@ -732,3 +732,111 @@ func (s *Store) AddRecordLink(ctx context.Context, link RecordLink) error {
 		link.SourceKind, link.SourceID, link.TargetKind, link.TargetID, link.Relation, link.Note)
 	return err
 }
+
+// ListChunks returns all chunks of a document ordered by section_index.
+func (s *Store) ListChunks(ctx context.Context, docID string) ([]Chunk, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, document_id, section_index, heading_path, content, context_prefix, updated_at
+		FROM chunks
+		WHERE document_id = $1
+		ORDER BY section_index ASC`, docID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Chunk
+	for rows.Next() {
+		var ch Chunk
+		if err := rows.Scan(&ch.ID, &ch.DocumentID, &ch.SectionIndex, &ch.HeadingPath, &ch.Content, &ch.ContextPrefix, &ch.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, ch)
+	}
+	return out, rows.Err()
+}
+
+// ListNotes returns notes filtered by optional project and noteType ordered newest first.
+func (s *Store) ListNotes(ctx context.Context, project, noteType string, limit int) ([]Note, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, project, note_type, name, description, summary, tags, content, content_hash, source_agent, updated_at
+		FROM notes
+		WHERE ($1 = '' OR project = $1)
+		  AND ($2 = '' OR note_type = $2)
+		ORDER BY updated_at DESC, id ASC
+		LIMIT $3`, project, noteType, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Note
+	for rows.Next() {
+		var n Note
+		if err := rows.Scan(
+			&n.ID, &n.Project, &n.NoteType, &n.Name, &n.Description, &n.Summary,
+			&n.Tags, &n.Content, &n.ContentHash, &n.SourceAgent, &n.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
+// ListProjects returns distinct project names sorted alphabetically.
+func (s *Store) ListProjects(ctx context.Context) ([]string, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT project FROM documents
+		UNION
+		SELECT project FROM notes
+		UNION
+		SELECT project FROM benchmarks
+		ORDER BY 1 ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// ListRecordLinks returns advisory links pointing to targetKind and targetID.
+func (s *Store) ListRecordLinks(ctx context.Context, targetKind, targetID string) ([]RecordLink, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, source_kind, source_id, target_kind, target_id, relation, note, created_at
+		FROM record_links
+		WHERE target_kind = $1 AND target_id = $2
+		ORDER BY created_at DESC, id DESC`, targetKind, targetID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []RecordLink
+	for rows.Next() {
+		var l RecordLink
+		if err := rows.Scan(&l.ID, &l.SourceKind, &l.SourceID, &l.TargetKind, &l.TargetID, &l.Relation, &l.Note, &l.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, l)
+	}
+	return out, rows.Err()
+}
+
+// UpdateNoteEmbedding writes an embedding vector onto an existing memory note.
+func (s *Store) UpdateNoteEmbedding(ctx context.Context, noteID string, emb []float32) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE notes SET embedding = $2, updated_at = NOW() WHERE id = $1`, noteID, optionalVector(emb))
+	return err
+}
