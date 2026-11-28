@@ -292,20 +292,6 @@ func (s *Store) ListOwnersForProject(ctx context.Context, project string) ([]str
 	return scanStrings(rows)
 }
 
-// ListGitHubOwners returns all distinct owners present in github_repos.
-func (s *Store) ListGitHubOwners(ctx context.Context) ([]string, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT DISTINCT owner
-		FROM github_repos
-		WHERE NOT is_archived
-		ORDER BY owner ASC`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanStrings(rows)
-}
-
 // UpsertGitHubMilestones replaces stored milestones for repoFullName.
 func (s *Store) UpsertGitHubMilestones(ctx context.Context, repoFullName string, milestones []GitHubMilestone) error {
 	tx, err := s.pool.Begin(ctx)
@@ -388,7 +374,7 @@ func (s *Store) UpsertGitHubItem(ctx context.Context, item GitHubItem) (bool, er
 	labelsText := strings.Join(labels, " ")
 	hash := strings.TrimSpace(item.ContentHash)
 	if hash == "" {
-		hash = hashGitHubItem(item, labelsText)
+		hash = HashGitHubItem(item)
 	}
 	createdAt := item.GitHubCreatedAt
 	if createdAt.IsZero() {
@@ -541,15 +527,9 @@ func (s *Store) ListGitHubItems(ctx context.Context, filter GitHubItemFilter) ([
 	return out, rows.Err()
 }
 
-// EnqueueJob inserts a pending enrichment job unless an identical pending or running job exists.
+// EnqueueJob inserts a pending enrichment job unless an identical pending job exists.
 func (s *Store) EnqueueJob(ctx context.Context, jobType, targetKind, targetID string) error {
-	_, err := s.pool.Exec(ctx, `
-		INSERT INTO enrichment_jobs (job_type, target_kind, target_id)
-		VALUES ($1, $2, $3)
-		ON CONFLICT (job_type, target_kind, target_id)
-		WHERE status IN ('pending', 'running')
-		DO NOTHING`, jobType, targetKind, targetID)
-	return err
+	return enqueueJob(ctx, s.pool, jobType, targetKind, targetID)
 }
 
 func scanGitHubRepos(rows pgx.Rows) ([]GitHubRepo, error) {
@@ -591,7 +571,9 @@ func cleanGitHubLabels(in []string) []string {
 	return out
 }
 
-func hashGitHubItem(it GitHubItem, labelsText string) string {
+// HashGitHubItem returns a deterministic SHA-256 hex digest over normalized GitHub item fields.
+func HashGitHubItem(it GitHubItem) string {
+	labelsText := strings.Join(cleanGitHubLabels(it.Labels), " ")
 	h := sha256.New()
 	parent := 0
 	if it.ParentNumber != nil {

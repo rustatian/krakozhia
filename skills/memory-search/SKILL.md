@@ -7,7 +7,7 @@ Use the `search_knowledge`, `get_document`, `get_note`, `get_project_brief`, `qu
 
 When MCP tools are unavailable, run the CLI with `Bash`:
 
-- Search knowledge: `krakozhia search [--project P] [--kind note|doc] [--type T] [--tag G] [-k N] [--rerank] "<query>"`
+- Search knowledge: `krakozhia search [--project P] [--kind note|doc|github] [--type T] [--tag G] [-k N] [--rerank] "<query>"`
 - Read a full document or section: `krakozhia show <id>`
 - Read a project brief: `krakozhia brief <project>`
 - Query or compare benchmarks: `krakozhia bench query [--project P] [--suite S] [--metric M] [--latest]` and `krakozhia bench compare --project P --suite S --metric M`

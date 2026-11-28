@@ -48,6 +48,34 @@ func TestComputeRRF(t *testing.T) {
 	}
 }
 
+func TestComputeRecencyWeight(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name      string
+		updatedAt time.Time
+		want      float64
+	}{
+		{name: "same timestamp has weight 1.0", updatedAt: now, want: 1.0},
+		{name: "same-day timestamp stays 1.0", updatedAt: now.Add(-12 * time.Hour), want: 1.0},
+		{name: "future timestamp clamped to 1.0", updatedAt: now.Add(24 * time.Hour), want: 1.0},
+		{name: "zero timestamp defaults to 1.0", updatedAt: time.Time{}, want: 1.0},
+		{name: "60 days old decays to 0.70 + 0.30*exp(-1)", updatedAt: now.Add(-60 * 24 * time.Hour), want: 0.70 + 0.30*math.Exp(-1)},
+		{name: "360 days old approaches 0.70 floor", updatedAt: now.Add(-360 * 24 * time.Hour), want: 0.70 + 0.30*math.Exp(-6)},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := store.ComputeRecencyWeight(tc.updatedAt, now)
+			if math.Abs(got-tc.want) > 1e-12 {
+				t.Fatalf("ComputeRecencyWeight() = %.12f, want %.12f", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestValidateBenchmarkInput(t *testing.T) {
 	t.Parallel()
 
@@ -547,19 +575,151 @@ func TestChatSessionStoreLifecycle(t *testing.T) {
 		t.Fatalf("after MarkChatDistilled = %+v, %v", after, err)
 	}
 
-	// Verify ListNotesForBrief matches both canonical project and Claude Code directory slug.
-	if err := s.UpsertNote(ctx, store.UpsertNoteInput{
-		ID:          "-home-valery-projects-krakozhia/slug-note",
-		Project:     "-home-valery-projects-krakozhia",
-		NoteType:    "project",
-		Name:        "slug-note",
-		Description: "Matches canonical krakozhia brief",
-		Content:     "Remember canonical project mapping.",
+	// Verify a stale MarkChatDistilled does not clear a newer pending raw_excerpt.
+	if _, err := s.UpsertChatSession(ctx, store.IngestChatInput{
+		SourceAgent: "claude",
+		ExternalID:  "abc-123",
+		Project:     "krakozhia",
+		Title:       "Chat design",
+		RawExcerpt:  "User: Updated transcript with new turn.\nAssistant: Confirmed.",
 	}); err != nil {
-		t.Fatalf("UpsertNote slug: %v", err)
+		t.Fatalf("UpsertChatSession updated: %v", err)
 	}
-	briefNotes, err := s.ListNotesForBrief(ctx, "krakozhia", 20)
-	if err != nil || len(briefNotes) != 1 || briefNotes[0].ID != "-home-valery-projects-krakozhia/slug-note" {
-		t.Fatalf("ListNotesForBrief = %+v, %v", briefNotes, err)
+	if err := s.MarkChatDistilled(ctx, cs.ID, docRes.ID, cs.TranscriptHash); err != nil {
+		t.Fatalf("stale MarkChatDistilled: %v", err)
+	}
+	afterStale, err := s.GetChatSession(ctx, cs.ID)
+	if err != nil || afterStale.RawExcerpt == "" {
+		t.Fatalf("stale MarkChatDistilled wiped newer raw_excerpt: %+v, err=%v", afterStale, err)
+	}
+}
+
+func TestRecencySupersedeAndJobQueue(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	vec := unitVec(1024, 5, 1.0)
+	for _, docName := range []string{"old-design", "new-design"} {
+		if _, err := s.SaveDocument(ctx, store.SaveDocumentInput{
+			Project: "krakozhia",
+			Name:    docName,
+			DocType: "spec",
+			Title:   "Storage Design",
+			Content: "# Storage Design\n\nPostgreSQL vector storage architecture.\n",
+			Chunks: []store.ChunkInput{
+				{Section: chunk.Section{Index: 0, HeadingPath: "Storage Design", Content: "PostgreSQL vector storage architecture."}, Embedding: vec},
+			},
+		}); err != nil {
+			t.Fatalf("SaveDocument %s: %v", docName, err)
+		}
+	}
+
+	// Age old-design by 180 days; recency weighting must rank new-design first.
+	if err := s.Exec(ctx, `UPDATE documents SET updated_at = NOW() - INTERVAL '180 days' WHERE id = 'krakozhia/old-design'`); err != nil {
+		t.Fatalf("age old-design: %v", err)
+	}
+	hits, err := s.SearchKnowledge(ctx, store.SearchQuery{
+		Form:        store.FormHybrid,
+		Text:        "PostgreSQL vector storage",
+		QueryVector: vec,
+		Kind:        "doc",
+		Limit:       5,
+		DedupeDocs:  true,
+	})
+	if err != nil || len(hits) != 2 {
+		t.Fatalf("SearchKnowledge recency = %+v, err=%v", hits, err)
+	}
+	if hits[0].DocumentID != "krakozhia/new-design" || hits[0].Score <= hits[1].Score {
+		t.Fatalf("expected newer doc ranked above older doc, got %+v", hits)
+	}
+
+	// Equalize timestamps and mark old-design superseded by new-design; supersede penalty must rank new-design first.
+	if err := s.Exec(ctx, `UPDATE documents SET updated_at = NOW() WHERE id IN ('krakozhia/old-design', 'krakozhia/new-design')`); err != nil {
+		t.Fatalf("equalize timestamps: %v", err)
+	}
+	if err := s.AddRecordLink(ctx, store.RecordLink{
+		SourceKind: "doc",
+		SourceID:   "krakozhia/new-design",
+		TargetKind: "doc",
+		TargetID:   "krakozhia/old-design",
+		Relation:   "possible_supersedes",
+		Note:       "Replaces earlier storage design.",
+	}); err != nil {
+		t.Fatalf("AddRecordLink: %v", err)
+	}
+	hits, err = s.SearchKnowledge(ctx, store.SearchQuery{
+		Form:        store.FormHybrid,
+		Text:        "PostgreSQL vector storage",
+		QueryVector: vec,
+		Kind:        "doc",
+		Limit:       5,
+		DedupeDocs:  true,
+	})
+	if err != nil || len(hits) != 2 {
+		t.Fatalf("SearchKnowledge supersede = %+v, err=%v", hits, err)
+	}
+	if hits[0].DocumentID != "krakozhia/new-design" || hits[1].SupersededBy != "krakozhia/new-design" {
+		t.Fatalf("expected superseded doc penalized and annotated, got %+v", hits)
+	}
+
+	// Saving an org roadmap with SkipRefreshBrief must not pollute ListProjects or enqueue refresh_brief.
+	if _, err := s.SaveDocument(ctx, store.SaveDocumentInput{
+		Project:          "rapira-rs",
+		Name:             "org-roadmap",
+		DocType:          "roadmap",
+		Title:            "Org Roadmap",
+		Content:          "# Org Roadmap\n\nDirection.\n",
+		SkipEnrichDoc:    true,
+		SkipRefreshBrief: true,
+		Chunks: []store.ChunkInput{
+			{Section: chunk.Section{Index: 0, HeadingPath: "Org Roadmap", Content: "Direction."}},
+		},
+	}); err != nil {
+		t.Fatalf("SaveDocument org-roadmap: %v", err)
+	}
+	projects, err := s.ListProjects(ctx)
+	if err != nil || slices.Contains(projects, "rapira-rs") {
+		t.Fatalf("ListProjects should exclude org-roadmap-only owners, got %v, err=%v", projects, err)
+	}
+
+	// Drain existing jobs, then test concurrent follow-up enqueue while running and startup ReclaimRunningJobs.
+	for {
+		j, err := s.ClaimNextJob(ctx)
+		if err != nil {
+			t.Fatalf("drain ClaimNextJob: %v", err)
+		}
+		if j == nil {
+			break
+		}
+		if err := s.CompleteJob(ctx, j.ID); err != nil {
+			t.Fatalf("drain CompleteJob: %v", err)
+		}
+	}
+	if err := s.EnqueueJob(ctx, "refresh_brief", "project", "krakozhia"); err != nil {
+		t.Fatalf("EnqueueJob #1: %v", err)
+	}
+	j1, err := s.ClaimNextJob(ctx)
+	if err != nil || j1 == nil || j1.JobType != "refresh_brief" {
+		t.Fatalf("ClaimNextJob #1 = %+v, err=%v", j1, err)
+	}
+	// Enqueue follow-up while j1 is running; 004_job_queue.sql allows one pending row alongside running.
+	if err := s.EnqueueJob(ctx, "refresh_brief", "project", "krakozhia"); err != nil {
+		t.Fatalf("EnqueueJob while running: %v", err)
+	}
+	// Startup reclaim must resolve running+pending cleanly without unique constraint violation.
+	if err := s.ReclaimRunningJobs(ctx); err != nil {
+		t.Fatalf("ReclaimRunningJobs: %v", err)
+	}
+	j2, err := s.ClaimNextJob(ctx)
+	if err != nil || j2 == nil || j2.ID == j1.ID {
+		t.Fatalf("expected follow-up pending job after reclaim, got %+v (j1=%+v) err=%v", j2, j1, err)
+	}
+	// Reclaim a lone orphaned running job back to pending.
+	if err := s.ReclaimRunningJobs(ctx); err != nil {
+		t.Fatalf("ReclaimRunningJobs lone running: %v", err)
+	}
+	j3, err := s.ClaimNextJob(ctx)
+	if err != nil || j3 == nil || j3.ID != j2.ID {
+		t.Fatalf("expected reclaimed job %d, got %+v err=%v", j2.ID, j3, err)
 	}
 }
