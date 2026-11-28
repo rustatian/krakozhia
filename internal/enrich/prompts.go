@@ -36,10 +36,28 @@ Return one JSON object with keys:
   ## Open Questions
 Skip raw tool noise, retries, and filler. Preserve exact file names, commands, hostnames, flags, and numbers. Output raw JSON only.`
 
+	orgRoadmapSystemPrompt = `You synthesize an organization-wide GitHub roadmap and architectural direction map in Markdown for AI coding assistants.
+Use these exact sections (omit empty sections):
+## Ecosystem Overview
+## Implemented Capabilities
+## Planned Features and Active Epics
+## Architectural Directions and Extension Points
+## Repository Map
+Cite exact ticket references (owner/repo#number) and milestones. Separate committed work (active epics, milestones, open pull requests) from backlog proposals and discussions. Explicitly call out future transports, protocols, brokers, streams, storage backends, or cross-repo contracts so an AI designing interfaces today keeps them extensible for planned features. Keep the document concise, factual, and under 900 words. Output Markdown only.`
+
+	projectRoadmapSystemPrompt = `You synthesize a project GitHub roadmap and design-direction map in Markdown for AI coding assistants.
+Use these exact sections (omit empty sections):
+## Current Scope
+## Planned Features and Epics
+## Future Directions and Design Constraints
+## Related Repositories and Org Direction
+Cite exact ticket references (owner/repo#number) and milestones. Distinguish committed milestones, epics, and open pull requests from speculative backlog ideas. Explicitly name upcoming capabilities and extension points that future interfaces must accommodate. Keep the document concise, factual, and under 700 words. Output Markdown only.`
+
 	briefSystemPrompt = `You maintain a compact project brief in Markdown for AI coding assistants starting a new chat on this project.
-Synthesize the project architecture, recent conversation history and outcomes, active decisions, user preferences, and open questions from the provided documents, chat summaries, memory notes, and optional benchmarks.
+Synthesize the project architecture, planned roadmap and future extension points (citing exact GitHub ticket references and sibling organization repositories when provided), recent conversation decisions and outcomes, active user preferences and memory notes, and open questions.
+Call out planned capabilities (such as upcoming transports, brokers, streams, storage backends, or platform targets) so the assistant designs extensible solutions instead of assuming current scope is final.
 Include a Benchmarks section only when benchmark entries are provided (preserve exact numbers and units).
-Keep the brief concise, factual, and under 500 words.`
+Keep the brief concise, factual, and under 750 words.`
 )
 
 func buildChatDistillPrompt(cs store.ChatSession) string {
@@ -77,13 +95,45 @@ func buildNoteMetaPrompt(n store.Note) string {
 		n.ID, n.Name, n.NoteType, n.Description, truncateRunes(n.Content, 6000))
 }
 
-func buildBriefPrompt(project string, docs []store.Document, notes []store.Note, benches []store.Benchmark) string {
+func buildBriefPrompt(
+	project string,
+	docs []store.Document,
+	notes []store.Note,
+	benches []store.Benchmark,
+	repos []store.GitHubRepo,
+	projectRoadmap *store.Document,
+	orgRoadmaps []store.Document,
+) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Project: %s\n\n## Documents\n", project)
+	fmt.Fprintf(&b, "Project: %s\n", project)
+	if len(repos) > 0 {
+		b.WriteString("\n## Linked GitHub Repositories\n")
+		for _, r := range repos {
+			fmt.Fprintf(&b, "- %s: %s\n", r.FullName, strings.TrimSpace(r.Description))
+		}
+	}
+	if projectRoadmap != nil && strings.TrimSpace(projectRoadmap.ContentMD) != "" {
+		b.WriteString("\n## Project Roadmap and Planned Directions\n")
+		b.WriteString(truncateRunes(projectRoadmap.ContentMD, 5000))
+		b.WriteString("\n")
+	}
+	for _, orm := range orgRoadmaps {
+		if strings.TrimSpace(orm.ContentMD) == "" {
+			continue
+		}
+		fmt.Fprintf(&b, "\n## Organization Direction Map (%s)\n", orm.Project)
+		b.WriteString(truncateRunes(orm.ContentMD, 4000))
+		b.WriteString("\n")
+	}
+
+	b.WriteString("\n## Documents and Recent Chats\n")
 	if len(docs) == 0 {
 		b.WriteString("- (none)\n")
 	}
 	for _, d := range docs {
+		if d.DocType == "roadmap" {
+			continue
+		}
 		text := d.Summary
 		if text == "" {
 			text = d.Title
@@ -112,6 +162,127 @@ func buildBriefPrompt(project string, docs []store.Document, notes []store.Note,
 		}
 	}
 	return b.String()
+}
+
+func buildGitHubItemEmbedText(it store.GitHubItem) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s #%d (%s, %s): %s\n", it.RepoFullName, it.Number, it.Kind, it.State, it.Title)
+	if it.IssueType != "" {
+		fmt.Fprintf(&b, "Type: %s\n", it.IssueType)
+	}
+	if it.MilestoneTitle != "" {
+		fmt.Fprintf(&b, "Milestone: %s\n", it.MilestoneTitle)
+	}
+	if len(it.Labels) > 0 {
+		fmt.Fprintf(&b, "Labels: %s\n", strings.Join(it.Labels, ", "))
+	}
+	if it.Body != "" {
+		b.WriteString("\n")
+		b.WriteString(truncateRunes(it.Body, 2500))
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func buildOrgRoadmapPrompt(owner string, repos []store.GitHubRepo, milestones []store.GitHubMilestone, items []store.GitHubItem) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "GitHub Organization / Owner: %s\n\n## Repositories (%d)\n", owner, len(repos))
+	for i, r := range repos {
+		if i >= 80 {
+			fmt.Fprintf(&b, "- ... and %d more repositories\n", len(repos)-i)
+			break
+		}
+		desc := strings.TrimSpace(r.Description)
+		if desc == "" {
+			desc = "(no description)"
+		}
+		fmt.Fprintf(&b, "- %s: %s\n", r.FullName, truncateRunes(desc, 160))
+	}
+	writeMilestonesSection(&b, milestones)
+	writeGitHubItemsSection(&b, items, 15000)
+	return b.String()
+}
+
+func buildProjectRoadmapPrompt(
+	project string,
+	repos []store.GitHubRepo,
+	milestones []store.GitHubMilestone,
+	items []store.GitHubItem,
+	orgRoadmaps []store.Document,
+) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Project: %s\n\n## Mapped GitHub Repositories\n", project)
+	for _, r := range repos {
+		fmt.Fprintf(&b, "- %s: %s\n", r.FullName, strings.TrimSpace(r.Description))
+	}
+	writeMilestonesSection(&b, milestones)
+	writeGitHubItemsSection(&b, items, 12000)
+	for _, orm := range orgRoadmaps {
+		if strings.TrimSpace(orm.ContentMD) == "" {
+			continue
+		}
+		fmt.Fprintf(&b, "\n## Parent Organization Roadmap (%s)\n", orm.Project)
+		b.WriteString(truncateRunes(orm.ContentMD, 4000))
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+func writeMilestonesSection(b *strings.Builder, milestones []store.GitHubMilestone) {
+	if len(milestones) == 0 {
+		return
+	}
+	b.WriteString("\n## Milestones\n")
+	for i, m := range milestones {
+		if i >= 25 {
+			break
+		}
+		due := ""
+		if m.DueOn != nil {
+			due = " due " + m.DueOn.UTC().Format("2006-01-02")
+		}
+		fmt.Fprintf(b, "- %s [%s%s] %s (%d open / %d closed): %s\n",
+			m.RepoFullName, m.State, due, m.Title, m.OpenIssues, m.ClosedIssues, truncateRunes(strings.TrimSpace(m.Description), 200))
+	}
+}
+
+func writeGitHubItemsSection(b *strings.Builder, items []store.GitHubItem, charBudget int) {
+	b.WriteString("\n## Issues, Pull Requests, and Discussions\n")
+	if len(items) == 0 {
+		b.WriteString("- (none)\n")
+		return
+	}
+	used := 0
+	for _, it := range items {
+		var line strings.Builder
+		fmt.Fprintf(&line, "- %s#%d [%s/%s", it.RepoFullName, it.Number, it.Kind, it.State)
+		if it.IssueType != "" {
+			fmt.Fprintf(&line, "/%s", it.IssueType)
+		}
+		if it.MilestoneTitle != "" {
+			fmt.Fprintf(&line, ", milestone:%s", it.MilestoneTitle)
+		}
+		if it.SubIssuesTotal > 0 {
+			fmt.Fprintf(&line, ", sub-issues:%d/%d", it.SubIssuesCompleted, it.SubIssuesTotal)
+		}
+		if it.ParentNumber != nil {
+			fmt.Fprintf(&line, ", parent:#%d", *it.ParentNumber)
+		}
+		if len(it.Labels) > 0 {
+			fmt.Fprintf(&line, ", labels:%s", strings.Join(it.Labels, ","))
+		}
+		fmt.Fprintf(&line, "] %s", it.Title)
+		if body := strings.TrimSpace(it.Body); body != "" {
+			snippet := strings.Join(strings.Fields(truncateRunes(body, 280)), " ")
+			fmt.Fprintf(&line, " -- %s", snippet)
+		}
+		line.WriteString("\n")
+		entry := line.String()
+		if used+len(entry) > charBudget {
+			break
+		}
+		b.WriteString(entry)
+		used += len(entry)
+	}
 }
 
 func truncateRunes(s string, limit int) string {

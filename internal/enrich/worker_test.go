@@ -135,7 +135,16 @@ func (m *mockInference) Chat(_ context.Context, sys, user string, _ int) (string
 		return "This section covers storage details in Vector Design.", nil
 	}
 	if strings.Contains(sys, "project brief") {
+		if strings.Contains(user, "Project Roadmap") || strings.Contains(user, "Organization Direction Map") {
+			return "# core\n\nUses Rust ZTS runtime. Planned roadmap includes message brokers and streams (rapira-rs/rapira#37).", nil
+		}
 		return "# krakozhia\n\nUses PostgreSQL with pgvector 0.8.7. Latest p95 recall: 42.5 ms.", nil
+	}
+	if strings.Contains(sys, "organization-wide GitHub roadmap") {
+		return "## Ecosystem Overview\nRapira Rust ecosystem.\n\n## Planned Features and Active Epics\n- rapira-rs/rapira#37: Unified transport interface for HTTP, gRPC, brokers, and streams.\n\n## Architectural Directions and Extension Points\nKeep core runtime traits transport-agnostic for future message queues and streams.", nil
+	}
+	if strings.Contains(sys, "project GitHub roadmap") {
+		return "## Current Scope\nHTTP and gRPC PHP worker server.\n\n## Planned Features and Epics\n- rapira-rs/rapira#37: Add broker and stream transports.\n\n## Future Directions and Design Constraints\nAvoid HTTP-only assumptions in request traits.", nil
 	}
 	if strings.Contains(sys, "conversation") {
 		return `{"title":"Chat History Design","summary":"Decided to distill transcripts asynchronously on RX 9070 XT.","tags":["chat","gpu","postgres"],"markdown":"## Context and Goal\nStore cross-model chat history.\n\n## Decisions Made\nDistill transcripts into versioned chat documents.\n\n## Changes and Outcomes\nAdded chat_sessions table.\n\n## Open Questions\nNone."}`, nil
@@ -334,6 +343,64 @@ func TestWorkerIntegrationAndIdempotency(t *testing.T) {
 	chatDoc, err := st.GetDocument(ctx, *chatSession.DocumentID, 0)
 	if err != nil || chatDoc.DocType != "chat" || chatDoc.Summary == "" || len(chatDoc.Tags) == 0 {
 		t.Fatalf("distilled chat doc = %+v, err=%v", chatDoc, err)
+	}
+
+	// Verify GitHub roadmap distillation (embed_github_item, distill_org_roadmap, distill_project_roadmap)
+	// flows into the project brief for a local project alias ("core" -> "rapira-rs/rapira").
+	if err := st.UpsertGitHubRepo(ctx, store.GitHubRepo{
+		FullName:    "rapira-rs/rapira",
+		Owner:       "rapira-rs",
+		Name:        "rapira",
+		Project:     "rapira",
+		Description: "Rust PHP application server",
+	}); err != nil {
+		t.Fatalf("UpsertGitHubRepo: %v", err)
+	}
+	if err := st.UpsertProjectRepo(ctx, "core", "rapira-rs/rapira"); err != nil {
+		t.Fatalf("UpsertProjectRepo: %v", err)
+	}
+	if _, err := st.UpsertGitHubItem(ctx, store.GitHubItem{
+		ID:             "rapira-rs/rapira#issue:37",
+		RepoFullName:   "rapira-rs/rapira",
+		Owner:          "rapira-rs",
+		Project:        "rapira",
+		Kind:           "issue",
+		Number:         37,
+		State:          "open",
+		IssueType:      "Feature",
+		Title:          "Unified broker and stream transport trait",
+		Body:           "Design transport interface for HTTP, gRPC, message queues, brokers, and streams.",
+		Labels:         []string{"architecture"},
+		SubIssuesTotal: 8,
+	}); err != nil {
+		t.Fatalf("UpsertGitHubItem: %v", err)
+	}
+	if err := st.EnqueueJob(ctx, "distill_org_roadmap", "org", "rapira-rs"); err != nil {
+		t.Fatalf("EnqueueJob org roadmap: %v", err)
+	}
+	if err := st.EnqueueJob(ctx, "distill_project_roadmap", "project", "core"); err != nil {
+		t.Fatalf("EnqueueJob project roadmap: %v", err)
+	}
+	for i := 0; i < 20; i++ {
+		worked, err := w.ProcessOnce(ctx)
+		if err != nil {
+			t.Fatalf("ProcessOnce roadmap step %d: %v", i, err)
+		}
+		if !worked {
+			break
+		}
+	}
+	orgDoc, err := st.GetDocument(ctx, "rapira-rs/org-roadmap", 0)
+	if err != nil || orgDoc.DocType != "roadmap" || !strings.Contains(orgDoc.ContentMD, "rapira-rs/rapira#37") {
+		t.Fatalf("org roadmap = %+v, err=%v", orgDoc, err)
+	}
+	projDoc, err := st.GetDocument(ctx, "core/roadmap", 0)
+	if err != nil || projDoc.DocType != "roadmap" || !strings.Contains(projDoc.ContentMD, "broker and stream") {
+		t.Fatalf("project roadmap = %+v, err=%v", projDoc, err)
+	}
+	coreBrief, err := st.GetProjectBrief(ctx, "core")
+	if err != nil || !strings.Contains(coreBrief.BriefMD, "rapira-rs/rapira#37") {
+		t.Fatalf("core brief missing roadmap context: %+v, err=%v", coreBrief, err)
 	}
 }
 
