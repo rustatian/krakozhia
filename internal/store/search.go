@@ -208,15 +208,27 @@ func (s *Store) searchVector(ctx context.Context, q SearchQuery, limit int) ([]S
 func (s *Store) searchFTS(ctx context.Context, q SearchQuery, limit int) ([]SearchHit, error) {
 	rows, err := s.pool.Query(ctx, `
 		WITH queries AS (
-			SELECT websearch_to_tsquery('english', $1) AS q_en,
-			       websearch_to_tsquery('simple', $1) AS q_simple
+			-- Build OR-combined tsquery lexemes so long prompts match partial terms without ANDing every word.
+			SELECT
+				coalesce(
+					(SELECT string_agg('''' || replace(replace(w, '\', '\\'), '''', '''''') || '''', ' | ')::tsquery
+					 FROM unnest(tsvector_to_array(to_tsvector('english', $1))) AS w),
+					''::tsquery
+				) AS q_en,
+				coalesce(
+					(SELECT string_agg('''' || replace(replace(w, '\', '\\'), '''', '''''') || '''', ' | ')::tsquery
+					 FROM unnest(tsvector_to_array(to_tsvector('simple', $1))) AS w
+					 WHERE to_tsvector('english', w) <> ''::tsvector
+					   AND length(w) >= 2),
+					''::tsquery
+				) AS q_simple
 		)
 		SELECT kind, id, document_id, project, item_type, title, heading_path, description, snippet, updated_at, score
 		FROM (
 			SELECT 'doc'::text AS kind, c.id, c.document_id, d.project, d.doc_type AS item_type,
 			       d.title, c.heading_path, d.summary AS description, c.content AS snippet,
 			       d.updated_at,
-			       (ts_rank_cd(c.tsv_en, queries.q_en) + ts_rank_cd(c.tsv_simple, queries.q_simple))::double precision AS score
+			       (ts_rank_cd(c.tsv_en, queries.q_en, 1 | 32) + ts_rank_cd(c.tsv_simple, queries.q_simple, 1 | 32))::double precision AS score
 			FROM chunks c
 			JOIN documents d ON d.id = c.document_id
 			CROSS JOIN queries
@@ -229,7 +241,7 @@ func (s *Store) searchFTS(ctx context.Context, q SearchQuery, limit int) ([]Sear
 			SELECT 'note'::text AS kind, n.id, ''::text AS document_id, n.project, n.note_type AS item_type,
 			       n.name AS title, ''::text AS heading_path, n.description, n.content AS snippet,
 			       n.updated_at,
-			       (ts_rank_cd(n.tsv_en, queries.q_en) + ts_rank_cd(n.tsv_simple, queries.q_simple))::double precision AS score
+			       (ts_rank_cd(n.tsv_en, queries.q_en, 1 | 32) + ts_rank_cd(n.tsv_simple, queries.q_simple, 1 | 32))::double precision AS score
 			FROM notes n
 			CROSS JOIN queries
 			WHERE ($2 = '' OR $2 = 'note')

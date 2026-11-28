@@ -390,3 +390,83 @@ func TestStoreDocumentsNotesBenchmarksSearchAndJobs(t *testing.T) {
 		t.Fatalf("DeleteDocument: %v", err)
 	}
 }
+
+func TestSearchFTSORLexemes(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	seedNotes := []store.UpsertNoteInput{
+		{
+			ID:          "infra/roche-host",
+			Project:     "infra",
+			NoteType:    "reference",
+			Name:        "rlc-roche host configuration",
+			Description: "SSH and CLAUDE.md notes for rlc-roche",
+			Content:     "Connect via ssh rlc-roche and edit CLAUDE.md in the repository.",
+			SourceAgent: "claude",
+		},
+		{
+			ID:          "infra/unrelated",
+			Project:     "infra",
+			NoteType:    "reference",
+			Name:        "docker nginx proxy",
+			Description: "Container reverse proxy configuration",
+			Content:     "Run nginx container with custom upstream config.",
+			SourceAgent: "claude",
+		},
+	}
+	for _, n := range seedNotes {
+		if err := s.UpsertNote(ctx, n); err != nil {
+			t.Fatalf("UpsertNote %s: %v", n.ID, err)
+		}
+	}
+
+	cases := []struct {
+		name      string
+		query     string
+		wantTopID string
+		wantCount int
+	}{
+		{
+			name:      "long prompt matches partial terms via OR",
+			query:     "please check the CLAUDE.md file on rlc-roche host after copying backups",
+			wantTopID: "infra/roche-host",
+			wantCount: 1,
+		},
+		{
+			name:      "punctuation backslashes quotes and Cyrillic do not error",
+			query:     `foo\bar 'quoted' !&|() привет rlc-roche`,
+			wantTopID: "infra/roche-host",
+			wantCount: 1,
+		},
+		{
+			name:      "stopwords and punctuation only return empty without error",
+			query:     "the and for of in !!! &&& ||| ()",
+			wantCount: 0,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hits, err := s.SearchKnowledge(ctx, store.SearchQuery{
+				Form:  store.FormText,
+				Text:  tc.query,
+				Limit: 10,
+			})
+			if err != nil {
+				t.Fatalf("SearchKnowledge(%q) err = %v", tc.query, err)
+			}
+			if len(hits) != tc.wantCount {
+				t.Fatalf("SearchKnowledge(%q) count = %d, want %d (hits=%+v)", tc.query, len(hits), tc.wantCount, hits)
+			}
+			if tc.wantTopID != "" {
+				if hits[0].ID != tc.wantTopID {
+					t.Fatalf("top hit = %q, want %q", hits[0].ID, tc.wantTopID)
+				}
+				if hits[0].TextScore == nil || *hits[0].TextScore <= 0 {
+					t.Fatalf("expected positive TextScore on hit: %+v", hits[0])
+				}
+			}
+		})
+	}
+}
