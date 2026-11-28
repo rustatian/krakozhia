@@ -64,11 +64,8 @@ func New(reader Reader, search SearchFunc) http.Handler {
 			}
 			return fmt.Sprintf("%+.2f%%", *d)
 		},
-		"urlEscape": url.QueryEscape,
+		"urlEscape":  url.QueryEscape,
 		"pathEscape": url.PathEscape,
-		"joinTags": func(tags []string) string {
-			return strings.Join(tags, ", ")
-		},
 	}
 	tmpl := template.Must(template.New("ui").Funcs(funcs).Parse(uiTemplates))
 	u := &UI{

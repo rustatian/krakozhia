@@ -71,7 +71,7 @@ func ResolveClaudeFolderProject(claudeProjectsDir, slug, homeDir string) string 
 		paths, err := filepath.Glob(filepath.Join(claudeProjectsDir, slug, "*.jsonl"))
 		if err == nil {
 			for _, p := range paths {
-				if cwd := firstClaudeCwd(p); cwd != "" {
+				if cwd := FirstClaudeCwd(p); cwd != "" {
 					return ResolveProject(cwd, homeDir)
 				}
 			}
@@ -86,7 +86,8 @@ func ResolveClaudeFolderProject(claudeProjectsDir, slug, homeDir string) string 
 	return slug
 }
 
-func firstClaudeCwd(path string) string {
+// FirstClaudeCwd reads the leading lines of a Claude Code transcript JSONL and returns the first non-empty cwd.
+func FirstClaudeCwd(path string) string {
 	f, err := os.Open(path)
 	if err != nil {
 		return ""
@@ -177,10 +178,13 @@ func parseClaudeFile(path string, mtime time.Time, homeDir string) (Session, boo
 	if updated.IsZero() {
 		updated = mtime
 	}
-	project := ResolveProject(cwd, homeDir)
+	project, repoFullName := ResolveWorkspace(cwd, homeDir)
 	if cwd == "" {
 		folder := filepath.Base(filepath.Dir(path))
-		project = sanitizeProjectName(strings.TrimLeft(folder, "-"))
+		project = ResolveClaudeFolderProject(filepath.Dir(filepath.Dir(path)), folder, homeDir)
+		if strings.HasPrefix(project, "-") {
+			project = sanitizeProjectName(strings.TrimLeft(project, "-"))
+		}
 	}
 	return Session{
 		ID:             "claude:" + sessionID,
@@ -188,7 +192,7 @@ func parseClaudeFile(path string, mtime time.Time, homeDir string) (Session, boo
 		ExternalID:     sessionID,
 		Project:        project,
 		WorkspacePath:  cwd,
-		RepoFullName:   ResolveGitRemote(cwd, homeDir),
+		RepoFullName:   repoFullName,
 		Title:          deriveTitle(title, turns),
 		StartedAt:      started,
 		UpdatedAt:      updated,

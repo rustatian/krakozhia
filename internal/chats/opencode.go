@@ -90,13 +90,14 @@ func ScanOpenCode(opencodeDir, homeDir string, opts ScanOptions) ([]Session, err
 		if !ok {
 			continue
 		}
+		project, repoFullName := ResolveWorkspace(c.dir, homeDir)
 		out = append(out, Session{
 			ID:             "opencode:" + c.id,
 			SourceAgent:    "opencode",
 			ExternalID:     c.id,
-			Project:        ResolveProject(c.dir, homeDir),
+			Project:        project,
 			WorkspacePath:  c.dir,
-			RepoFullName:   ResolveGitRemote(c.dir, homeDir),
+			RepoFullName:   repoFullName,
 			Title:          deriveTitle(c.title, turns),
 			StartedAt:      c.createdAt,
 			UpdatedAt:      c.updatedAt,

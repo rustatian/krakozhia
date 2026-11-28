@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pgvector/pgvector-go"
 
 	"github.com/rustatian/krakozhia/internal/chunk"
@@ -28,16 +29,17 @@ type ChunkInput struct {
 
 // SaveDocumentInput specifies a document save request.
 type SaveDocumentInput struct {
-	Project       string
-	Name          string
-	DocType       string
-	Title         string
-	Summary       string
-	Tags          []string
-	Content       string
-	SourceAgent   string
-	SkipEnrichDoc bool
-	Chunks        []ChunkInput
+	Project          string
+	Name             string
+	DocType          string
+	Title            string
+	Summary          string
+	Tags             []string
+	Content          string
+	SourceAgent      string
+	SkipEnrichDoc    bool
+	SkipRefreshBrief bool
+	Chunks           []ChunkInput
 }
 
 // SaveDocumentResult summarizes a saved document revision.
@@ -206,11 +208,19 @@ func optionalVector(v []float32) any {
 	return pgvector.NewVector(v)
 }
 
+type jobExecer interface {
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+}
+
 func enqueueJobTx(ctx context.Context, tx pgx.Tx, jobType, targetKind, targetID string) error {
-	_, err := tx.Exec(ctx, `
+	return enqueueJob(ctx, tx, jobType, targetKind, targetID)
+}
+
+func enqueueJob(ctx context.Context, execer jobExecer, jobType, targetKind, targetID string) error {
+	_, err := execer.Exec(ctx, `
 		INSERT INTO enrichment_jobs (job_type, target_kind, target_id)
 		VALUES ($1, $2, $3)
-		ON CONFLICT (job_type, target_kind, target_id) WHERE status IN ('pending', 'running')
+		ON CONFLICT (job_type, target_kind, target_id) WHERE status = 'pending'
 		DO NOTHING`, jobType, targetKind, targetID)
 	return err
 }
@@ -313,8 +323,10 @@ func (s *Store) SaveDocument(ctx context.Context, in SaveDocumentInput) (SaveDoc
 			return SaveDocumentResult{}, err
 		}
 	}
-	if err := enqueueJobTx(ctx, tx, "refresh_brief", "project", in.Project); err != nil {
-		return SaveDocumentResult{}, err
+	if !in.SkipRefreshBrief {
+		if err := enqueueJobTx(ctx, tx, "refresh_brief", "project", in.Project); err != nil {
+			return SaveDocumentResult{}, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return SaveDocumentResult{}, err
@@ -662,14 +674,47 @@ func (s *Store) UpsertProjectBrief(ctx context.Context, project, briefMD, source
 	return err
 }
 
-// ClaimNextJob claims one ready pending enrichment job using SKIP LOCKED.
+// ReclaimRunningJobs resets orphaned running jobs left behind by a prior server shutdown or crash.
+func (s *Store) ReclaimRunningJobs(ctx context.Context) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Mark obsolete running rows done when a newer pending or running job exists for the same target.
+	if _, err := tx.Exec(ctx, `
+		UPDATE enrichment_jobs r
+		SET status = 'done', updated_at = NOW()
+		WHERE r.status = 'running'
+		  AND EXISTS (
+			SELECT 1 FROM enrichment_jobs p
+			WHERE p.id <> r.id
+			  AND p.job_type = r.job_type
+			  AND p.target_kind = r.target_kind
+			  AND p.target_id = r.target_id
+			  AND (p.status = 'pending' OR (p.status = 'running' AND p.id > r.id))
+		  )`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE enrichment_jobs
+		SET status = 'pending', run_after = NOW(), updated_at = NOW()
+		WHERE status = 'running'`); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// ClaimNextJob claims one ready pending enrichment job (or stale running job >15m) using SKIP LOCKED.
 func (s *Store) ClaimNextJob(ctx context.Context) (*EnrichmentJob, error) {
 	var j EnrichmentJob
 	err := s.pool.QueryRow(ctx, `
 		WITH next_job AS (
 			SELECT id
 			FROM enrichment_jobs
-			WHERE status = 'pending' AND run_after <= NOW()
+			WHERE (status = 'pending' AND run_after <= NOW())
+			   OR (status = 'running' AND updated_at < NOW() - INTERVAL '15 minutes')
 			ORDER BY run_after ASC, id ASC
 			FOR UPDATE SKIP LOCKED
 			LIMIT 1
@@ -700,12 +745,23 @@ func (s *Store) CompleteJob(ctx context.Context, id int64) error {
 func (s *Store) FailJob(ctx context.Context, id int64, errMsg string, retryDelay time.Duration) error {
 	const maxAttempts = 5
 	_, err := s.pool.Exec(ctx, `
-		UPDATE enrichment_jobs
-		SET status = CASE WHEN attempts >= $4 THEN 'failed' ELSE 'pending' END,
+		UPDATE enrichment_jobs e
+		SET status = CASE
+				WHEN EXISTS (
+					SELECT 1 FROM enrichment_jobs p
+					WHERE p.id <> e.id
+					  AND p.job_type = e.job_type
+					  AND p.target_kind = e.target_kind
+					  AND p.target_id = e.target_id
+					  AND p.status = 'pending'
+				) THEN 'done'
+				WHEN e.attempts >= $4 THEN 'failed'
+				ELSE 'pending'
+			END,
 		    last_error = $2,
 		    run_after = NOW() + ($3 * INTERVAL '1 millisecond'),
 		    updated_at = NOW()
-		WHERE id = $1`, id, errMsg, retryDelay.Milliseconds(), maxAttempts)
+		WHERE e.id = $1`, id, errMsg, retryDelay.Milliseconds(), maxAttempts)
 	return err
 }
 
@@ -801,10 +857,10 @@ func (s *Store) ListNotes(ctx context.Context, project, noteType string, limit i
 	return out, rows.Err()
 }
 
-// ListProjects returns distinct project names sorted alphabetically.
+// ListProjects returns distinct project names sorted alphabetically, excluding org-level roadmaps.
 func (s *Store) ListProjects(ctx context.Context) ([]string, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT project FROM documents
+		SELECT project FROM documents WHERE name <> 'org-roadmap'
 		UNION
 		SELECT project FROM notes
 		UNION
@@ -822,6 +878,33 @@ func (s *Store) ListProjects(ctx context.Context) ([]string, error) {
 			return nil, err
 		}
 		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// ListSupersededDocs returns a map of target document ID to the newest superseding document ID.
+func (s *Store) ListSupersededDocs(ctx context.Context, docIDs []string) (map[string]string, error) {
+	out := map[string]string{}
+	if len(docIDs) == 0 {
+		return out, nil
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT DISTINCT ON (target_id) target_id, source_id
+		FROM record_links
+		WHERE target_kind = 'doc'
+		  AND relation IN ('possible_supersedes', 'supersedes')
+		  AND target_id = ANY($1)
+		ORDER BY target_id, created_at DESC, id DESC`, docIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var targetID, sourceID string
+		if err := rows.Scan(&targetID, &sourceID); err != nil {
+			return nil, err
+		}
+		out[targetID] = sourceID
 	}
 	return out, rows.Err()
 }

@@ -3,29 +3,28 @@ package enrich
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/rustatian/krakozhia/internal/store"
 )
 
 const (
-	docMetaSystemPrompt = `You summarize technical knowledge documents and output strict JSON only.
-Return one JSON object with keys:
+	docMetaSystemPrompt = `You summarize technical knowledge documents and output one raw JSON object with no extra commentary.
+Keys:
 - "summary": 1 to 2 concise sentences stating the purpose and main decision or finding.
 - "tags": JSON array of up to 8 lowercase hyphenated strings (for example ["go", "postgres"]).
-- "possible_supersedes": list of {"id": "<doc_id>", "reason": "<short reason>"} ONLY for listed existing documents that this document clearly replaces or updates. Return [] if none.
-Output raw JSON only with no extra commentary.`
+- "possible_supersedes": list of {"id": "<doc_id>", "reason": "<short reason>"} ONLY for listed existing documents that this document clearly replaces or updates. Return [] if none.`
 
 	chunkPrefixSystemPrompt = `You write a short contextual retrieval prefix for a document section.
 Write 1 to 2 short sentences explaining what this section covers within the full document, naming the key system, tool, or decision. Output plain text only.`
 
-	noteMetaSystemPrompt = `You summarize a developer memory note and output strict JSON only.
-Return one JSON object with keys:
+	noteMetaSystemPrompt = `You summarize a developer memory note and output one raw JSON object with no extra commentary.
+Keys:
 - "summary": 1 concise sentence summarizing the fact or rule.
-- "tags": JSON array of up to 8 lowercase hyphenated strings (for example ["go", "postgres"]).
-Output raw JSON only with no extra commentary.`
+- "tags": JSON array of up to 8 lowercase hyphenated strings (for example ["go", "postgres"]).`
 
-	chatDistillSystemPrompt = `You distill a developer and AI coding conversation into a concise, reusable knowledge note in strict JSON.
-Return one JSON object with keys:
+	chatDistillSystemPrompt = `You distill a developer and AI coding conversation into one raw JSON object with no extra commentary.
+Keys:
 - "title": short descriptive title (at most 10 words).
 - "summary": 1 to 2 concise sentences capturing the main decision, fix, or outcome.
 - "tags": JSON array of up to 8 lowercase hyphenated strings (for example ["go", "postgres"]).
@@ -34,30 +33,41 @@ Return one JSON object with keys:
   ## Decisions Made
   ## Changes and Outcomes
   ## Open Questions
-Skip raw tool noise, retries, and filler. Preserve exact file names, commands, hostnames, flags, and numbers. Output raw JSON only.`
+Skip raw tool noise, retries, and filler. Preserve exact file names, commands, hostnames, flags, and numbers.`
 
-	orgRoadmapSystemPrompt = `You synthesize an organization-wide GitHub roadmap and architectural direction map in Markdown for AI coding assistants.
-Use these exact sections (omit empty sections):
+	orgRoadmapSystemPrompt = `You synthesize an organization-wide GitHub roadmap and direction map in Markdown for AI coding assistants.
+Use these exact sections and omit any section that has no evidence in the input:
 ## Ecosystem Overview
 ## Implemented Capabilities
 ## Planned Features and Active Epics
 ## Architectural Directions and Extension Points
 ## Repository Map
-Cite exact ticket references (owner/repo#number) and milestones. Separate committed work (active epics, milestones, open pull requests) from backlog proposals and discussions. Explicitly call out future transports, protocols, brokers, streams, storage backends, or cross-repo contracts so an AI designing interfaces today keeps them extensible for planned features. Keep the document concise, factual, and under 900 words. Output Markdown only.`
+Rules:
+- Include ONLY facts, repositories, milestones, and tickets explicitly present in the provided input. Never invent technologies, plans, dates, or footers.
+- Cite exact ticket references (owner/repo#number) and milestones.
+- Separate committed work (active epics, milestones, open pull requests) from backlog proposals and discussions.
+- Under Architectural Directions and Extension Points, list ONLY planned capabilities or cross-repo constraints that appear in the provided tickets or discussions.
+- Keep the document concise, factual, and under 900 words. Output Markdown only.`
 
-	projectRoadmapSystemPrompt = `You synthesize a project GitHub roadmap and design-direction map in Markdown for AI coding assistants.
-Use these exact sections (omit empty sections):
+	projectRoadmapSystemPrompt = `You synthesize a project GitHub roadmap and direction map in Markdown for AI coding assistants.
+Use these exact sections and omit any section that has no evidence in the input:
 ## Current Scope
 ## Planned Features and Epics
 ## Future Directions and Design Constraints
 ## Related Repositories and Org Direction
-Cite exact ticket references (owner/repo#number) and milestones. Distinguish committed milestones, epics, and open pull requests from speculative backlog ideas. Explicitly name upcoming capabilities and extension points that future interfaces must accommodate. Keep the document concise, factual, and under 700 words. Output Markdown only.`
+Rules:
+- Include ONLY facts, tickets, and plans explicitly present in the provided input. Never invent technologies, plans, dates, or footers.
+- Cite exact ticket references (owner/repo#number) and milestones.
+- Distinguish committed milestones, epics, and open pull requests from backlog ideas.
+- Keep the document concise, factual, and under 700 words. Output Markdown only.`
 
 	briefSystemPrompt = `You maintain a compact project brief in Markdown for AI coding assistants starting a new chat on this project.
-Synthesize the project architecture, planned roadmap and future extension points (citing exact GitHub ticket references and sibling organization repositories when provided), recent conversation decisions and outcomes, active user preferences and memory notes, and open questions.
-Call out planned capabilities (such as upcoming transports, brokers, streams, storage backends, or platform targets) so the assistant designs extensible solutions instead of assuming current scope is final.
-Include a Benchmarks section only when benchmark entries are provided (preserve exact numbers and units).
-Keep the brief concise, factual, and under 750 words.`
+Synthesize the project architecture, planned GitHub roadmap and extension points, recent conversation decisions and outcomes, active memory notes, and open questions from the provided input.
+Rules:
+- Include ONLY facts, tickets, and plans explicitly present in the provided input. Never invent technologies, future plans, dates, word counts, or footers.
+- Every input item is prefixed with its [YYYY-MM-DD] date (newest first). When a newer record contradicts an older record on the same topic, treat the newer record as the current truth and drop the superseded decision. Ignore records marked [superseded by ...].
+- Include a Benchmarks section ONLY when benchmark entries are provided (preserve exact numbers and units); otherwise omit it completely without writing "None" or "Not Applicable".
+- Keep the brief concise, factual, and under 750 words. Output Markdown only.`
 )
 
 func buildChatDistillPrompt(cs store.ChatSession) string {
@@ -97,7 +107,9 @@ func buildNoteMetaPrompt(n store.Note) string {
 
 func buildBriefPrompt(
 	project string,
+	now time.Time,
 	docs []store.Document,
+	superseded map[string]string,
 	notes []store.Note,
 	benches []store.Benchmark,
 	repos []store.GitHubRepo,
@@ -105,7 +117,7 @@ func buildBriefPrompt(
 	orgRoadmaps []store.Document,
 ) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Project: %s\n", project)
+	fmt.Fprintf(&b, "Project: %s\nCurrent Date: %s\n", project, now.UTC().Format(time.DateOnly))
 	if len(repos) > 0 {
 		b.WriteString("\n## Linked GitHub Repositories\n")
 		for _, r := range repos {
@@ -113,7 +125,7 @@ func buildBriefPrompt(
 		}
 	}
 	if projectRoadmap != nil && strings.TrimSpace(projectRoadmap.ContentMD) != "" {
-		b.WriteString("\n## Project Roadmap and Planned Directions\n")
+		fmt.Fprintf(&b, "\n## Project Roadmap [%s]\n", projectRoadmap.UpdatedAt.UTC().Format(time.DateOnly))
 		b.WriteString(truncateRunes(projectRoadmap.ContentMD, 5000))
 		b.WriteString("\n")
 	}
@@ -121,12 +133,12 @@ func buildBriefPrompt(
 		if strings.TrimSpace(orm.ContentMD) == "" {
 			continue
 		}
-		fmt.Fprintf(&b, "\n## Organization Direction Map (%s)\n", orm.Project)
+		fmt.Fprintf(&b, "\n## Organization Direction Map (%s) [%s]\n", orm.Project, orm.UpdatedAt.UTC().Format(time.DateOnly))
 		b.WriteString(truncateRunes(orm.ContentMD, 4000))
 		b.WriteString("\n")
 	}
 
-	b.WriteString("\n## Documents and Recent Chats\n")
+	b.WriteString("\n## Documents and Recent Chats (newest first)\n")
 	if len(docs) == 0 {
 		b.WriteString("- (none)\n")
 	}
@@ -138,9 +150,14 @@ func buildBriefPrompt(
 		if text == "" {
 			text = d.Title
 		}
-		fmt.Fprintf(&b, "- %s (%s, rev %d): %s - %s\n", d.ID, d.DocType, d.CurrentRevision, d.Title, text)
+		sup := ""
+		if newerID, ok := superseded[d.ID]; ok {
+			sup = fmt.Sprintf(" [superseded by %s]", newerID)
+		}
+		fmt.Fprintf(&b, "- [%s] %s (%s, rev %d)%s: %s - %s\n",
+			d.UpdatedAt.UTC().Format(time.DateOnly), d.ID, d.DocType, d.CurrentRevision, sup, d.Title, text)
 	}
-	b.WriteString("\n## Memory Notes\n")
+	b.WriteString("\n## Memory Notes (newest first)\n")
 	if len(notes) == 0 {
 		b.WriteString("- (none)\n")
 	}
@@ -149,7 +166,8 @@ func buildBriefPrompt(
 		if text == "" {
 			text = n.Description
 		}
-		fmt.Fprintf(&b, "- %s (%s): %s - %s\n", n.ID, n.NoteType, n.Name, text)
+		fmt.Fprintf(&b, "- [%s] %s (%s): %s - %s\n",
+			n.UpdatedAt.UTC().Format(time.DateOnly), n.ID, n.NoteType, n.Name, text)
 	}
 	if len(benches) > 0 {
 		b.WriteString("\n## Latest Benchmarks\n")
@@ -158,7 +176,8 @@ func buildBriefPrompt(
 			if bm.DeltaPct != nil {
 				delta = fmt.Sprintf(" (delta %.2f%%)", *bm.DeltaPct)
 			}
-			fmt.Fprintf(&b, "- %s/%s: %g %s [%s]%s\n", bm.Suite, bm.Metric, bm.Value, bm.Unit, bm.Status, delta)
+			fmt.Fprintf(&b, "- [%s] %s/%s: %g %s [%s]%s\n",
+				bm.RecordedAt.UTC().Format(time.DateOnly), bm.Suite, bm.Metric, bm.Value, bm.Unit, bm.Status, delta)
 		}
 	}
 	return b.String()

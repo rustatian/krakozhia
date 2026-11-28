@@ -402,6 +402,9 @@ func TestWorkerIntegrationAndIdempotency(t *testing.T) {
 	if err != nil || !strings.Contains(coreBrief.BriefMD, "rapira-rs/rapira#37") {
 		t.Fatalf("core brief missing roadmap context: %+v, err=%v", coreBrief, err)
 	}
+	if _, err := st.GetProjectBrief(ctx, "rapira-rs"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("expected no project brief for org owner rapira-rs, got err=%v", err)
+	}
 }
 
 func TestParseChatDistill(t *testing.T) {
@@ -447,12 +450,18 @@ func TestParseChatDistill(t *testing.T) {
 			wantErr:  true,
 		},
 		{
-			name:      "falls back to raw markdown when model skips json",
-			raw:       "# Plain Markdown Title\n\n## Decisions Made\nKept simple config.\n",
+			name:      "strips think block and preamble before json",
+			raw:       "<think>reasoning here</think>\nHere is the JSON:\n{\"title\":\"GPU Setup\",\"summary\":\"Switched to Gemma 4 12B.\",\"tags\":[\"gpu\",\"gemma4\"],\"markdown\":\"## Decisions Made\\nUse Gemma 4.\"}",
 			fallback:  "Fallback",
-			wantTitle: "Plain Markdown Title",
-			wantSum:   "Plain Markdown Title",
-			wantTags:  []string{"chat"},
+			wantTitle: "GPU Setup",
+			wantSum:   "Switched to Gemma 4 12B.",
+			wantTags:  []string{"gpu", "gemma4"},
+		},
+		{
+			name:     "non-json markdown rejected for retry",
+			raw:      "# Plain Markdown Title\n\n## Decisions Made\nKept simple config.\n",
+			fallback: "Fallback",
+			wantErr:  true,
 		},
 		{
 			name:     "empty response fails",
@@ -503,12 +512,16 @@ func TestWorkerLiveGPU(t *testing.T) {
 		t.Fatalf("SaveDocument: %v", err)
 	}
 
+	chatModel := os.Getenv("KRAKOZHIA_CHAT_MODEL")
+	if chatModel == "" {
+		chatModel = "gemma-4-12b-it"
+	}
 	inf := inference.New(inference.Config{
 		BaseURL:     infURL,
 		EmbedModel:  "qwen3-embedding-0.6b",
-		ChatModel:   "qwen3-4b-instruct",
+		ChatModel:   chatModel,
 		RerankModel: "bge-reranker-v2-m3",
-		Timeout:     30 * time.Second,
+		Timeout:     180 * time.Second,
 	})
 	w := enrich.New(enrich.Config{
 		Store:        st,

@@ -66,12 +66,8 @@ func (o ScanOptions) inWindow(updated time.Time) bool {
 	return true
 }
 
-// ResolveProject maps a workspace path or file:// URI to a canonical short project name.
-func ResolveProject(workspacePath, homeDir string) string {
+func cleanWorkspacePath(workspacePath string) string {
 	ws := strings.TrimSpace(workspacePath)
-	if ws == "" {
-		return "general"
-	}
 	if after, ok := strings.CutPrefix(ws, "file://"); ok {
 		if u, err := url.PathUnescape(after); err == nil {
 			ws = u
@@ -79,19 +75,28 @@ func ResolveProject(workspacePath, homeDir string) string {
 			ws = after
 		}
 	}
+	return ws
+}
+
+// ResolveWorkspace maps a workspace path or file:// URI to a canonical short project name and optional GitHub "owner/repo".
+func ResolveWorkspace(workspacePath, homeDir string) (project, repoFullName string) {
+	ws := cleanWorkspacePath(workspacePath)
+	if ws == "" {
+		return "general", ""
+	}
 	clean := filepath.Clean(ws)
 	if clean == "." || clean == "/" {
-		return "general"
+		return "general", ""
 	}
 	cleanHome := ""
 	if homeDir != "" {
 		cleanHome = filepath.Clean(homeDir)
 		if clean == cleanHome {
-			return "home"
+			return "home", ""
 		}
 	}
 
-	// Walk up to find a git repository root, stopping before homeDir and filesystem root.
+	// Walk up once to find a git repository root, stopping before homeDir and filesystem root.
 	cur := clean
 	for {
 		if cur == "/" || cur == "." || (cleanHome != "" && cur == cleanHome) {
@@ -101,10 +106,13 @@ func ResolveProject(workspacePath, homeDir string) string {
 		if info, err := os.Stat(gitPath); err == nil {
 			if !info.IsDir() {
 				if mainRoot := resolveGitWorktreeRoot(cur, gitPath); mainRoot != "" {
-					return sanitizeProjectName(filepath.Base(mainRoot))
+					configPath := filepath.Join(mainRoot, ".git", "config")
+					return sanitizeProjectName(filepath.Base(mainRoot)), ParseGitHubRemoteURL(readOriginURL(configPath))
 				}
+				return sanitizeProjectName(filepath.Base(cur)), ""
 			}
-			return sanitizeProjectName(filepath.Base(cur))
+			configPath := filepath.Join(gitPath, "config")
+			return sanitizeProjectName(filepath.Base(cur)), ParseGitHubRemoteURL(readOriginURL(configPath))
 		}
 		parent := filepath.Dir(cur)
 		if parent == cur {
@@ -112,7 +120,19 @@ func ResolveProject(workspacePath, homeDir string) string {
 		}
 		cur = parent
 	}
-	return sanitizeProjectName(filepath.Base(clean))
+	return sanitizeProjectName(filepath.Base(clean)), ""
+}
+
+// ResolveProject maps a workspace path or file:// URI to a canonical short project name.
+func ResolveProject(workspacePath, homeDir string) string {
+	project, _ := ResolveWorkspace(workspacePath, homeDir)
+	return project
+}
+
+// ResolveGitRemote returns the normalized GitHub "owner/repo" for the workspace's origin remote, or "".
+func ResolveGitRemote(workspacePath, homeDir string) string {
+	_, repo := ResolveWorkspace(workspacePath, homeDir)
+	return repo
 }
 
 func resolveGitWorktreeRoot(worktreeDir, gitFile string) string {
@@ -135,57 +155,6 @@ func resolveGitWorktreeRoot(worktreeDir, gitFile string) string {
 	slashed := filepath.ToSlash(filepath.Clean(gitDir))
 	if before, _, found := strings.Cut(slashed, "/.git/worktrees/"); found && before != "" {
 		return filepath.FromSlash(before)
-	}
-	return ""
-}
-
-// ResolveGitRemote returns the normalized GitHub "owner/repo" for the workspace's origin remote, or "".
-func ResolveGitRemote(workspacePath, homeDir string) string {
-	ws := strings.TrimSpace(workspacePath)
-	if ws == "" {
-		return ""
-	}
-	if after, ok := strings.CutPrefix(ws, "file://"); ok {
-		if u, err := url.PathUnescape(after); err == nil {
-			ws = u
-		} else {
-			ws = after
-		}
-	}
-	clean := filepath.Clean(ws)
-	if clean == "." || clean == "/" {
-		return ""
-	}
-	cleanHome := ""
-	if homeDir != "" {
-		cleanHome = filepath.Clean(homeDir)
-		if clean == cleanHome {
-			return ""
-		}
-	}
-
-	cur := clean
-	for {
-		if cur == "/" || cur == "." || (cleanHome != "" && cur == cleanHome) {
-			break
-		}
-		gitPath := filepath.Join(cur, ".git")
-		if info, err := os.Stat(gitPath); err == nil {
-			configPath := filepath.Join(gitPath, "config")
-			if !info.IsDir() {
-				if mainRoot := resolveGitWorktreeRoot(cur, gitPath); mainRoot != "" {
-					configPath = filepath.Join(mainRoot, ".git", "config")
-				} else {
-					return ""
-				}
-			}
-			return ParseGitHubRemoteURL(readOriginURL(configPath))
-		}
-		parent := filepath.Dir(cur)
-		if parent == cur {
-			break
-		}
-		cur = parent
 	}
 	return ""
 }

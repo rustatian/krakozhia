@@ -182,6 +182,11 @@ func TestConfigValidation(t *testing.T) {
 			envTok:  "env-tok",
 			wantErr: false,
 		},
+		{
+			name:    "trims whitespace around url and token",
+			json:    `{"url":"  https://kb.lab.rustatian.me  ","token":"  tok-123  "}`,
+			wantErr: false,
+		},
 	}
 
 	for _, tc := range cases {
@@ -198,8 +203,8 @@ func TestConfigValidation(t *testing.T) {
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("LoadConfig error = %v, wantErr %v", err, tc.wantErr)
 			}
-			if !tc.wantErr && (cfg.URL != cli.DefaultURL || cfg.MaxDistance != cli.DefaultMaxDistance || cfg.MinTextScore != cli.DefaultMinTextScore) {
-				t.Fatalf("defaults mismatch: %+v", cfg)
+			if !tc.wantErr && (cfg.URL != cli.DefaultURL || cfg.MaxDistance != cli.DefaultMaxDistance || cfg.MinTextScore != cli.DefaultMinTextScore || strings.TrimSpace(cfg.Token) != cfg.Token) {
+				t.Fatalf("defaults or trimming mismatch: %+v", cfg)
 			}
 		})
 	}

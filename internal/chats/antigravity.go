@@ -87,13 +87,14 @@ func ScanAntigravity(agyDir, homeDir string, opts ScanOptions) ([]Session, error
 		}
 
 		wsPath := firstWorkspaceURI(wsRaw)
+		project, repoFullName := ResolveWorkspace(wsPath, homeDir)
 		out = append(out, Session{
 			ID:             "antigravity:" + convID,
 			SourceAgent:    "antigravity",
 			ExternalID:     convID,
-			Project:        ResolveProject(wsPath, homeDir),
+			Project:        project,
 			WorkspacePath:  wsPath,
-			RepoFullName:   ResolveGitRemote(wsPath, homeDir),
+			RepoFullName:   repoFullName,
 			Title:          deriveTitle(title, turns),
 			StartedAt:      started,
 			UpdatedAt:      updated,
@@ -133,9 +134,9 @@ func firstWorkspaceURI(raw string) string {
 	}
 	var uris []string
 	if json.Unmarshal([]byte(raw), &uris) == nil && len(uris) > 0 {
-		return strings.TrimPrefix(uris[0], "file://")
+		return cleanWorkspacePath(uris[0])
 	}
-	return strings.TrimPrefix(raw, "file://")
+	return cleanWorkspacePath(raw)
 }
 
 func parseAgyTranscript(path string) ([]Turn, time.Time, time.Time) {

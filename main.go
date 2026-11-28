@@ -57,8 +57,16 @@ func runServe() error {
 	listen := envOr("KRAKOZHIA_LISTEN", ":8080")
 	infURL := envOr("KRAKOZHIA_INFERENCE_URL", "http://llama-server.inference.svc.cluster.local:8080")
 	embedModel := envOr("KRAKOZHIA_EMBED_MODEL", "qwen3-embedding-0.6b")
-	chatModel := envOr("KRAKOZHIA_CHAT_MODEL", "qwen3-4b-instruct")
+	chatModel := envOr("KRAKOZHIA_CHAT_MODEL", "gemma-4-12b-it")
 	rerankModel := envOr("KRAKOZHIA_RERANK_MODEL", "bge-reranker-v2-m3")
+	infTimeout := 180 * time.Second
+	if raw := os.Getenv("KRAKOZHIA_INFERENCE_TIMEOUT"); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil || d <= 0 {
+			return fmt.Errorf("invalid KRAKOZHIA_INFERENCE_TIMEOUT %q", raw)
+		}
+		infTimeout = d
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -72,13 +80,16 @@ func runServe() error {
 	if err := st.Migrate(ctx); err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}
+	if err := st.ReclaimRunningJobs(ctx); err != nil {
+		return fmt.Errorf("reclaim running jobs: %w", err)
+	}
 
 	inf := inference.New(inference.Config{
 		BaseURL:     infURL,
 		EmbedModel:  embedModel,
 		ChatModel:   chatModel,
 		RerankModel: rerankModel,
-		Timeout:     30 * time.Second,
+		Timeout:     infTimeout,
 	})
 
 	var ghSyncer *githubsync.Syncer
@@ -127,17 +138,14 @@ func runServe() error {
 		})
 		return res.Hits, res.Degraded, err
 	})
-	srvCfg := server.Config{
-		Store:     st,
-		Inference: inf,
-		Token:     token,
-		Version:   "0.1.0",
-		WebUI:     ui,
-	}
-	if ghSyncer != nil {
-		srvCfg.GitHubSyncer = ghSyncer
-	}
-	srv = server.New(srvCfg)
+	srv = server.New(server.Config{
+		Store:        st,
+		Inference:    inf,
+		GitHubSyncer: ghSyncer,
+		Token:        token,
+		Version:      "0.1.0",
+		WebUI:        ui,
+	})
 
 	workers := 1
 	if raw := os.Getenv("KRAKOZHIA_ENRICH_WORKERS"); raw != "" {

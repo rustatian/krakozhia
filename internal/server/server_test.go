@@ -45,10 +45,6 @@ func (f *fakeInference) EmbedDocument(_ context.Context, text string) ([]float32
 	return f.vecFor(text), nil
 }
 
-func (f *fakeInference) Chat(context.Context, string, string, int) (string, error) {
-	return "ok", nil
-}
-
 func (f *fakeInference) Rerank(_ context.Context, _ string, docs []string) ([]inference.RerankResult, error) {
 	if f.rerankErr != nil {
 		return nil, f.rerankErr

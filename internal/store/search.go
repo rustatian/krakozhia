@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"math"
 	"slices"
 	"strings"
 	"time"
@@ -16,7 +17,12 @@ const (
 	FormHybrid = "hybrid"
 )
 
-const rrfK = 60.0
+const (
+	rrfK              = 60.0
+	recencyFloor      = 0.70
+	recencyDecayDays  = 60.0
+	SupersededPenalty = 0.65
+)
 
 // SearchQuery configures hybrid retrieval across document chunks, memory notes, and GitHub items.
 type SearchQuery struct {
@@ -34,20 +40,21 @@ type SearchQuery struct {
 
 // SearchHit is one ranked result from SearchKnowledge.
 type SearchHit struct {
-	Kind        string    `json:"kind"`
-	ID          string    `json:"id"`
-	DocumentID  string    `json:"document_id,omitempty"`
-	Project     string    `json:"project"`
-	Type        string    `json:"type"`
-	Title       string    `json:"title"`
-	HeadingPath string    `json:"heading_path,omitempty"`
-	Description string    `json:"description,omitempty"`
-	Snippet     string    `json:"snippet"`
-	URL         string    `json:"url,omitempty"`
-	UpdatedAt   time.Time `json:"updated_at"`
-	Distance    *float64  `json:"distance,omitempty"`
-	TextScore   *float64  `json:"text_score,omitempty"`
-	Score       float64   `json:"score"`
+	Kind         string    `json:"kind"`
+	ID           string    `json:"id"`
+	DocumentID   string    `json:"document_id,omitempty"`
+	Project      string    `json:"project"`
+	Type         string    `json:"type"`
+	Title        string    `json:"title"`
+	HeadingPath  string    `json:"heading_path,omitempty"`
+	Description  string    `json:"description,omitempty"`
+	Snippet      string    `json:"snippet"`
+	URL          string    `json:"url,omitempty"`
+	SupersededBy string    `json:"superseded_by,omitempty"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	Distance     *float64  `json:"distance,omitempty"`
+	TextScore    *float64  `json:"text_score,omitempty"`
+	Score        float64   `json:"score"`
 }
 
 // ComputeRRF combines 1-based vector and full-text ranks with reciprocal rank fusion (k=60).
@@ -60,6 +67,18 @@ func ComputeRRF(vecRank, textRank int) float64 {
 		score += 1.0 / (rrfK + float64(textRank))
 	}
 	return score
+}
+
+// ComputeRecencyWeight returns a bounded decay factor in [0.70, 1.00] favoring newer records on the same topic.
+func ComputeRecencyWeight(updatedAt, now time.Time) float64 {
+	if updatedAt.IsZero() || !now.After(updatedAt) {
+		return 1.0
+	}
+	ageDays := math.Floor(now.Sub(updatedAt).Hours() / 24.0)
+	if ageDays <= 0 {
+		return 1.0
+	}
+	return recencyFloor + (1.0-recencyFloor)*math.Exp(-ageDays/recencyDecayDays)
 }
 
 // SearchKnowledge runs vector, full-text, or hybrid RRF search across chunks and notes.
@@ -114,9 +133,27 @@ func (s *Store) SearchKnowledge(ctx context.Context, q SearchQuery) ([]SearchHit
 		}
 	}
 
+	var docIDs []string
+	seenDoc := map[string]bool{}
+	for _, c := range byKey {
+		if c.hit.Kind == "doc" && c.hit.DocumentID != "" && !seenDoc[c.hit.DocumentID] {
+			seenDoc[c.hit.DocumentID] = true
+			docIDs = append(docIDs, c.hit.DocumentID)
+		}
+	}
+	superseded, _ := s.ListSupersededDocs(ctx, docIDs)
+
+	now := time.Now().UTC()
 	merged := make([]SearchHit, 0, len(byKey))
 	for _, c := range byKey {
-		c.hit.Score = ComputeRRF(c.vecRank, c.textRank)
+		score := ComputeRRF(c.vecRank, c.textRank) * ComputeRecencyWeight(c.hit.UpdatedAt, now)
+		if c.hit.Kind == "doc" {
+			if newerID, ok := superseded[c.hit.DocumentID]; ok {
+				c.hit.SupersededBy = newerID
+				score *= SupersededPenalty
+			}
+		}
+		c.hit.Score = score
 		merged = append(merged, c.hit)
 	}
 	slices.SortFunc(merged, func(a, b SearchHit) int {

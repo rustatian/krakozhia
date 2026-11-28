@@ -222,7 +222,7 @@ func TestScanAntigravity(t *testing.T) {
 	t.Parallel()
 
 	home := t.TempDir()
-	repo := filepath.Join(home, "projects", "infrastructure")
+	repo := filepath.Join(home, "projects", "my infra")
 	_ = os.MkdirAll(filepath.Join(repo, ".git"), 0o755)
 	agyDir := filepath.Join(home, ".gemini", "antigravity-cli")
 	_ = os.MkdirAll(filepath.Join(agyDir, "cache"), 0o755)
@@ -240,7 +240,7 @@ func TestScanAntigravity(t *testing.T) {
 		t.Fatalf("create table: %v", err)
 	}
 	ts := time.Now().UTC().Add(-15 * time.Minute).Format("2006-01-02 15:04:05+00:00")
-	wsJSON := mustJSON(t, []string{"file://" + repo})
+	wsJSON := mustJSON(t, []string{"file://" + strings.ReplaceAll(repo, " ", "%20")})
 	_, _ = db.Exec(`INSERT INTO conversation_summaries VALUES ('conv-top', 'RX 9070 XT Passthrough', ?, ?, '', 0)`, wsJSON, ts)
 	_, _ = db.Exec(`INSERT INTO conversation_summaries VALUES ('conv-internal', 'Internal', ?, ?, '', 0)`, wsJSON, ts)
 	_, _ = db.Exec(`INSERT INTO conversation_summaries VALUES ('conv-sub', 'Subagent', ?, ?, 'conv-top', 1)`, wsJSON, ts)
@@ -265,7 +265,7 @@ func TestScanAntigravity(t *testing.T) {
 		t.Fatalf("len(sessions) = %d, want 1 (%+v)", len(sessions), sessions)
 	}
 	s := sessions[0]
-	if s.ID != "antigravity:conv-top" || s.Project != "infrastructure" || s.Title != "RX 9070 XT Passthrough" {
+	if s.ID != "antigravity:conv-top" || s.Project != "my-infra" || s.WorkspacePath != repo || s.Title != "RX 9070 XT Passthrough" {
 		t.Fatalf("unexpected session: %+v", s)
 	}
 	if !strings.Contains(s.RawExcerpt, "vfio-rx9070xt.sh") || strings.Contains(s.RawExcerpt, "hidden") {

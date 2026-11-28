@@ -53,7 +53,6 @@ func Split(markdown, fallbackTitle string) []Section {
 		fenceChar byte
 		h1        = strings.TrimSpace(fallbackTitle)
 		h2, h3    string
-		seenH1    bool
 	)
 
 	flush := func() {
@@ -90,12 +89,8 @@ func Split(markdown, fallbackTitle string) []Section {
 			flush()
 			h1 = heading
 			h2, h3 = "", ""
-			seenH1 = true
 		case 2:
 			flush()
-			if !seenH1 && h1 == "" {
-				h1 = strings.TrimSpace(fallbackTitle)
-			}
 			h2 = heading
 			h3 = ""
 		case 3:

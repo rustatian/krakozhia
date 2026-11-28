@@ -23,19 +23,19 @@ type evalPrompt struct {
 }
 
 type evalSummary struct {
-	Form             string
-	RecallAtK        float64
-	MRR              float64
-	FalseInjections  int
-	NegativeCount    int
-	FalseInjectRate  float64
-	P50Ms            float64
-	P95Ms            float64
-	PosDistP50       string
-	PosDistP90       string
-	NegDistMin       string
-	PosTextP50       string
-	NegTextMax       string
+	Form            string
+	RecallAtK       float64
+	MRR             float64
+	FalseInjections int
+	NegativeCount   int
+	FalseInjectRate float64
+	P50Ms           float64
+	P95Ms           float64
+	PosDistP50      string
+	PosDistP90      string
+	NegDistMin      string
+	PosTextP50      string
+	NegTextMax      string
 }
 
 func runEval(args []string, stdout io.Writer) error {
@@ -47,14 +47,14 @@ func runEval(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("eval", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	rerank := fs.Bool("rerank", false, "also evaluate hybrid+rerank")
-	kind := fs.String("kind", "note", "kind filter (note, doc, or empty for all)")
+	kind := fs.String("kind", "note", "kind filter (note, doc, github, or empty for all)")
 	maxDist := fs.Float64("max-distance", cfg.MaxDistance, "gate distance limit")
 	minText := fs.Float64("min-text-score", cfg.MinTextScore, "gate full-text score floor")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: krakozhia eval [--rerank] [--kind note|doc|\"\"] [--max-distance F] [--min-text-score F] <testset.jsonl>")
+		return fmt.Errorf("usage: krakozhia eval [--rerank] [--kind note|doc|github|\"\"] [--max-distance F] [--min-text-score F] <testset.jsonl>")
 	}
 
 	prompts, err := loadTestset(fs.Arg(0))
@@ -156,9 +156,7 @@ func evalForm(ctx context.Context, client *Client, prompts []evalPrompt, form, k
 
 		var gated []store.SearchHit
 		for _, h := range resp.Hits {
-			if form == store.FormText && h.TextScore != nil && *h.TextScore >= minText {
-				gated = append(gated, h)
-			} else if form != store.FormText && RecallGate(h, maxDist, minText) {
+			if RecallGate(h, maxDist, minText) {
 				gated = append(gated, h)
 			}
 			if len(gated) >= k {

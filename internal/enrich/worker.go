@@ -143,12 +143,16 @@ func (w *Worker) ProcessOnce(ctx context.Context) (bool, error) {
 	}
 
 	if runErr != nil {
-		if fErr := w.store.FailJob(ctx, job.ID, runErr.Error(), Backoff(job.Attempts)); fErr != nil {
+		finCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if fErr := w.store.FailJob(finCtx, job.ID, runErr.Error(), Backoff(job.Attempts)); fErr != nil {
 			w.log.Error("failed to record job error", "job_id", job.ID, "err", fErr)
 		}
 		return true, runErr
 	}
-	if err := w.store.CompleteJob(ctx, job.ID); err != nil {
+	finCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := w.store.CompleteJob(finCtx, job.ID); err != nil {
 		return true, err
 	}
 	return true, nil
@@ -347,7 +351,7 @@ func (w *Worker) distillOrgRoadmap(ctx context.Context, owner string) error {
 	if err != nil {
 		return err
 	}
-	body := stripMarkdownFence(rawMD)
+	body := stripCodeFence(rawMD)
 	if body == "" {
 		return errors.New("empty org roadmap response")
 	}
@@ -360,7 +364,7 @@ func (w *Worker) distillOrgRoadmap(ctx context.Context, owner string) error {
 	docBody.WriteString("\n")
 
 	content, _ := secrets.Redact(docBody.String())
-	if err := w.saveRoadmapDocument(ctx, owner, "org-roadmap", title, firstSummaryLine(body, title), []string{"roadmap", "github", strings.ToLower(owner)}, content); err != nil {
+	if err := w.saveRoadmapDocument(ctx, owner, "org-roadmap", title, firstSummaryLine(body, title), []string{"roadmap", "github", strings.ToLower(owner)}, content, true); err != nil {
 		return err
 	}
 
@@ -405,7 +409,7 @@ func (w *Worker) distillProjectRoadmap(ctx context.Context, project string) erro
 	if err != nil {
 		return err
 	}
-	body := stripMarkdownFence(rawMD)
+	body := stripCodeFence(rawMD)
 	if body == "" {
 		return errors.New("empty project roadmap response")
 	}
@@ -429,10 +433,10 @@ func (w *Worker) distillProjectRoadmap(ctx context.Context, project string) erro
 	for _, orm := range orgRoadmaps {
 		tags = append(tags, strings.ToLower(orm.Project))
 	}
-	return w.saveRoadmapDocument(ctx, project, "roadmap", title, firstSummaryLine(body, title), normalizeTags(tags), content)
+	return w.saveRoadmapDocument(ctx, project, "roadmap", title, firstSummaryLine(body, title), normalizeTags(tags), content, false)
 }
 
-func (w *Worker) saveRoadmapDocument(ctx context.Context, project, name, title, summary string, tags []string, content string) error {
+func (w *Worker) saveRoadmapDocument(ctx context.Context, project, name, title, summary string, tags []string, content string, skipRefreshBrief bool) error {
 	sections := chunk.Split(content, title)
 	chunkInputs := make([]store.ChunkInput, len(sections))
 	for i, sec := range sections {
@@ -442,16 +446,17 @@ func (w *Worker) saveRoadmapDocument(ctx context.Context, project, name, title, 
 		}
 	}
 	_, err := w.store.SaveDocument(ctx, store.SaveDocumentInput{
-		Project:       project,
-		Name:          name,
-		DocType:       "roadmap",
-		Title:         title,
-		Summary:       summary,
-		Tags:          tags,
-		Content:       content,
-		SourceAgent:   "githubsync",
-		SkipEnrichDoc: true,
-		Chunks:        chunkInputs,
+		Project:          project,
+		Name:             name,
+		DocType:          "roadmap",
+		Title:            title,
+		Summary:          summary,
+		Tags:             tags,
+		Content:          content,
+		SourceAgent:      "githubsync",
+		SkipEnrichDoc:    true,
+		SkipRefreshBrief: skipRefreshBrief,
+		Chunks:           chunkInputs,
 	})
 	return err
 }
@@ -494,7 +499,7 @@ func (w *Worker) refreshBrief(ctx context.Context, project string) error {
 	if err != nil {
 		return err
 	}
-	notes, err := w.store.ListNotesForBrief(ctx, project, 20)
+	notes, err := w.store.ListNotes(ctx, project, "", 20)
 	if err != nil {
 		return err
 	}
@@ -524,6 +529,15 @@ func (w *Worker) refreshBrief(ctx context.Context, project string) error {
 		return nil
 	}
 
+	docIDs := make([]string, 0, len(docs))
+	for _, d := range docs {
+		docIDs = append(docIDs, d.ID)
+	}
+	superseded, err := w.store.ListSupersededDocs(ctx, docIDs)
+	if err != nil {
+		return err
+	}
+
 	sourceHash := hashBriefInputs(docs, notes, benches, projectRoadmap, orgRoadmaps)
 	existing, err := w.store.GetProjectBrief(ctx, project)
 	if err == nil && existing.SourceHash == sourceHash {
@@ -533,11 +547,11 @@ func (w *Worker) refreshBrief(ctx context.Context, project string) error {
 		return err
 	}
 
-	briefMD, err := w.inf.Chat(ctx, briefSystemPrompt, buildBriefPrompt(project, docs, notes, benches, repos, projectRoadmap, orgRoadmaps), 1280)
+	briefMD, err := w.inf.Chat(ctx, briefSystemPrompt, buildBriefPrompt(project, time.Now().UTC(), docs, superseded, notes, benches, repos, projectRoadmap, orgRoadmaps), 1280)
 	if err != nil {
 		return err
 	}
-	briefMD = strings.TrimSpace(briefMD)
+	briefMD = stripCodeFence(briefMD)
 	if briefMD == "" {
 		return errors.New("empty project brief response")
 	}
@@ -546,7 +560,7 @@ func (w *Worker) refreshBrief(ctx context.Context, project string) error {
 
 // ParseDocMeta parses and validates JSON document enrichment output.
 func ParseDocMeta(raw string, validTargetIDs map[string]bool, selfID string) (DocMeta, error) {
-	cleaned := stripJSONFence(raw)
+	cleaned := extractJSONObject(raw)
 	var wire struct {
 		Summary            string          `json:"summary"`
 		Tags               json.RawMessage `json:"tags"`
@@ -577,7 +591,7 @@ func ParseDocMeta(raw string, validTargetIDs map[string]bool, selfID string) (Do
 
 // ParseNoteMeta parses and validates JSON note enrichment output.
 func ParseNoteMeta(raw string) (NoteMeta, error) {
-	cleaned := stripJSONFence(raw)
+	cleaned := extractJSONObject(raw)
 	var wire struct {
 		Summary string          `json:"summary"`
 		Tags    json.RawMessage `json:"tags"`
@@ -595,65 +609,44 @@ func ParseNoteMeta(raw string) (NoteMeta, error) {
 	return meta, nil
 }
 
-// ParseChatDistill parses structured JSON chat distillation output or falls back to plain Markdown.
+// ParseChatDistill parses structured JSON chat distillation output.
 func ParseChatDistill(raw, fallbackTitle string) (ChatDistill, error) {
-	cleaned := stripJSONFence(raw)
+	cleaned := extractJSONObject(raw)
 	if cleaned == "" {
 		return ChatDistill{}, errors.New("empty chat distillation response")
 	}
-	if strings.HasPrefix(cleaned, "{") {
-		var wire struct {
-			Title    string          `json:"title"`
-			Summary  string          `json:"summary"`
-			Tags     json.RawMessage `json:"tags"`
-			Markdown string          `json:"markdown"`
-		}
-		if err := json.Unmarshal([]byte(cleaned), &wire); err != nil {
-			return ChatDistill{}, fmt.Errorf("parse chat distill json: %w", err)
-		}
-		md := strings.TrimSpace(wire.Markdown)
-		if md == "" {
-			return ChatDistill{}, errors.New("chat distillation markdown is empty")
-		}
-		title := strings.TrimSpace(wire.Title)
-		if title == "" {
-			title = strings.TrimSpace(fallbackTitle)
-		}
-		if title == "" {
-			title = "Session Summary"
-		}
-		summary := strings.TrimSpace(wire.Summary)
-		if summary == "" {
-			summary = title
-		}
-		tags := parseFlexibleTags(wire.Tags)
-		if len(tags) == 0 {
-			tags = []string{"chat"}
-		}
-		return ChatDistill{
-			Title:    title,
-			Summary:  summary,
-			Tags:     tags,
-			Markdown: md,
-		}, nil
+	var wire struct {
+		Title    string          `json:"title"`
+		Summary  string          `json:"summary"`
+		Tags     json.RawMessage `json:"tags"`
+		Markdown string          `json:"markdown"`
 	}
-
-	// Accept raw Markdown when the model skips the JSON wrapper.
-	md := stripMarkdownFence(raw)
+	if err := json.Unmarshal([]byte(cleaned), &wire); err != nil {
+		return ChatDistill{}, fmt.Errorf("parse chat distill json: %w", err)
+	}
+	md := strings.TrimSpace(wire.Markdown)
 	if md == "" {
-		return ChatDistill{}, errors.New("empty chat distillation response")
+		return ChatDistill{}, errors.New("chat distillation markdown is empty")
 	}
-	title := chunk.Title(md)
+	title := strings.TrimSpace(wire.Title)
 	if title == "" {
 		title = strings.TrimSpace(fallbackTitle)
 	}
 	if title == "" {
 		title = "Session Summary"
 	}
+	summary := strings.TrimSpace(wire.Summary)
+	if summary == "" {
+		summary = title
+	}
+	tags := parseFlexibleTags(wire.Tags)
+	if len(tags) == 0 {
+		tags = []string{"chat"}
+	}
 	return ChatDistill{
 		Title:    title,
-		Summary:  title,
-		Tags:     []string{"chat"},
+		Summary:  summary,
+		Tags:     tags,
 		Markdown: md,
 	}, nil
 }
@@ -681,17 +674,48 @@ func parseFlexibleTags(raw json.RawMessage) []string {
 	return normalizeTags(out)
 }
 
-func stripMarkdownFence(raw string) string {
-	s := strings.TrimSpace(raw)
-	if rest, ok := strings.CutPrefix(s, "```markdown"); ok {
-		s = rest
-	} else if rest, ok := strings.CutPrefix(s, "```md"); ok {
-		s = rest
-	} else if rest, ok := strings.CutPrefix(s, "```"); ok {
-		s = rest
+func stripCodeFence(raw string) string {
+	s := stripThoughtBlocks(raw)
+	if strings.HasPrefix(s, "```") {
+		if _, after, ok := strings.Cut(s, "\n"); ok {
+			s = after
+		} else {
+			s = strings.TrimPrefix(s, "```")
+		}
 	}
-	s = strings.TrimSuffix(s, "```")
+	s = strings.TrimSuffix(strings.TrimSpace(s), "```")
 	return strings.TrimSpace(s)
+}
+
+func extractJSONObject(raw string) string {
+	s := stripCodeFence(raw)
+	start := strings.IndexByte(s, '{')
+	end := strings.LastIndexByte(s, '}')
+	if start >= 0 && end > start {
+		return strings.TrimSpace(s[start : end+1])
+	}
+	return s
+}
+
+func stripThoughtBlocks(raw string) string {
+	s := strings.TrimSpace(raw)
+	for _, pair := range [][2]string{
+		{"<think>", "</think>"},
+		{"<|channel>thought", "<channel|>"},
+	} {
+		for {
+			start := strings.Index(s, pair[0])
+			if start < 0 {
+				break
+			}
+			end := strings.Index(s[start+len(pair[0]):], pair[1])
+			if end < 0 {
+				break
+			}
+			s = strings.TrimSpace(s[:start] + s[start+len(pair[0])+end+len(pair[1]):])
+		}
+	}
+	return s
 }
 
 func chatDocumentName(agent, externalID string) string {
@@ -730,17 +754,6 @@ func Backoff(attempt int) time.Duration {
 		return 15 * time.Minute
 	}
 	return delay
-}
-
-func stripJSONFence(raw string) string {
-	s := strings.TrimSpace(raw)
-	if rest, ok := strings.CutPrefix(s, "```json"); ok {
-		s = rest
-	} else if rest, ok := strings.CutPrefix(s, "```"); ok {
-		s = rest
-	}
-	s = strings.TrimSuffix(s, "```")
-	return strings.TrimSpace(s)
 }
 
 func normalizeTags(tags []string) []string {

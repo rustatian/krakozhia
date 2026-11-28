@@ -157,41 +157,13 @@ func (s *Store) GetChatSession(ctx context.Context, id string) (ChatSession, err
 	return cs, err
 }
 
-// MarkChatDistilled links a distilled chat document and clears raw_excerpt so PostgreSQL stays compact.
+// MarkChatDistilled links a distilled chat document and clears raw_excerpt only when transcript_hash still matches.
 func (s *Store) MarkChatDistilled(ctx context.Context, id, documentID, distilledHash string) error {
 	_, err := s.pool.Exec(ctx, `
 		UPDATE chat_sessions
-		SET document_id = $2, distilled_hash = $3, raw_excerpt = ''
+		SET document_id = $2,
+		    distilled_hash = $3,
+		    raw_excerpt = CASE WHEN transcript_hash = $3 THEN '' ELSE raw_excerpt END
 		WHERE id = $1`, id, documentID, distilledHash)
 	return err
-}
-
-// ListNotesForBrief returns notes matching project directly or matching a Claude Code directory slug suffix.
-func (s *Store) ListNotesForBrief(ctx context.Context, project string, limit int) ([]Note, error) {
-	if limit <= 0 {
-		limit = 20
-	}
-	rows, err := s.pool.Query(ctx, `
-		SELECT id, project, note_type, name, description, summary, tags, content, content_hash, source_agent, updated_at
-		FROM notes
-		WHERE project = $1
-		   OR ($1 NOT LIKE '-%' AND length($1) >= 3 AND project LIKE '%-' || $1)
-		ORDER BY updated_at DESC, id ASC
-		LIMIT $2`, project, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var out []Note
-	for rows.Next() {
-		var n Note
-		if err := rows.Scan(
-			&n.ID, &n.Project, &n.NoteType, &n.Name, &n.Description, &n.Summary,
-			&n.Tags, &n.Content, &n.ContentHash, &n.SourceAgent, &n.UpdatedAt); err != nil {
-			return nil, err
-		}
-		out = append(out, n)
-	}
-	return out, rows.Err()
 }

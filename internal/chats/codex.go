@@ -153,13 +153,14 @@ func parseCodexFile(path string, mtime time.Time, homeDir string) (Session, bool
 	if updated.IsZero() {
 		updated = mtime
 	}
+	project, repoFullName := ResolveWorkspace(cwd, homeDir)
 	return Session{
 		ID:             "codex:" + sessionID,
 		SourceAgent:    "codex",
 		ExternalID:     sessionID,
-		Project:        ResolveProject(cwd, homeDir),
+		Project:        project,
 		WorkspacePath:  cwd,
-		RepoFullName:   ResolveGitRemote(cwd, homeDir),
+		RepoFullName:   repoFullName,
 		Title:          deriveTitle("", turns),
 		StartedAt:      started,
 		UpdatedAt:      updated,
