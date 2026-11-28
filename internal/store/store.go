@@ -103,21 +103,21 @@ type Note struct {
 
 // RecordBenchmarkInput specifies a structured benchmark or improvement measurement.
 type RecordBenchmarkInput struct {
-	Project     string
-	Suite       string
-	Metric      string
-	Value       float64
-	Unit        string
-	BaselineID  *int64
-	DeltaPct    *float64
-	GitCommit   string
-	Branch      string
-	Environment string
-	Status      string
-	Notes       string
-	DocumentID  *string
-	SourceAgent string
-	RecordedAt  *time.Time
+	Project     string     `json:"project"`
+	Suite       string     `json:"suite"`
+	Metric      string     `json:"metric"`
+	Value       float64    `json:"value"`
+	Unit        string     `json:"unit"`
+	BaselineID  *int64     `json:"baseline_id,omitempty"`
+	DeltaPct    *float64   `json:"delta_pct,omitempty"`
+	GitCommit   string     `json:"git_commit,omitempty"`
+	Branch      string     `json:"branch,omitempty"`
+	Environment string     `json:"environment,omitempty"`
+	Status      string     `json:"status,omitempty"`
+	Notes       string     `json:"notes,omitempty"`
+	DocumentID  *string    `json:"document_id,omitempty"`
+	SourceAgent string     `json:"source_agent,omitempty"`
+	RecordedAt  *time.Time `json:"recorded_at,omitempty"`
 }
 
 // Benchmark represents one stored benchmark row.
