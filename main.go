@@ -93,7 +93,9 @@ func runServe() error {
 	})
 
 	var ghSyncer *githubsync.Syncer
-	if owners := githubsync.ParseOwners(os.Getenv("KRAKOZHIA_GITHUB_OWNERS")); len(owners) > 0 {
+	owners := githubsync.ParseOwners(os.Getenv("KRAKOZHIA_GITHUB_OWNERS"))
+	repos := githubsync.ParseRepos(os.Getenv("KRAKOZHIA_GITHUB_REPOS"))
+	if len(owners) > 0 || len(repos) > 0 {
 		ghToken := os.Getenv("KRAKOZHIA_GITHUB_TOKEN")
 		ghTokens := githubsync.ParseOwnerTokens(os.Getenv("KRAKOZHIA_GITHUB_TOKENS"))
 		if ghToken != "" || len(ghTokens) > 0 {
@@ -116,6 +118,7 @@ func runServe() error {
 			ghSyncer = githubsync.New(githubsync.Config{
 				Store:          st,
 				Owners:         owners,
+				Repos:          repos,
 				DefaultToken:   ghToken,
 				OwnerTokens:    ghTokens,
 				SyncInterval:   syncInterval,

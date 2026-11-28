@@ -290,6 +290,7 @@ func (w *Worker) distillChat(ctx context.Context, chatID string) error {
 	}
 
 	docName := chatDocumentName(cs.SourceAgent, cs.ExternalID)
+	updatedAt := cs.UpdatedAt
 	saved, err := w.store.SaveDocument(ctx, store.SaveDocumentInput{
 		Project:       cs.Project,
 		Name:          docName,
@@ -299,6 +300,7 @@ func (w *Worker) distillChat(ctx context.Context, chatID string) error {
 		Tags:          distilled.Tags,
 		Content:       content,
 		SourceAgent:   cs.SourceAgent,
+		UpdatedAt:     &updatedAt,
 		SkipEnrichDoc: true,
 		Chunks:        chunkInputs,
 	})

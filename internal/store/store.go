@@ -37,6 +37,7 @@ type SaveDocumentInput struct {
 	Tags             []string
 	Content          string
 	SourceAgent      string
+	UpdatedAt        *time.Time
 	SkipEnrichDoc    bool
 	SkipRefreshBrief bool
 	Chunks           []ChunkInput
@@ -273,13 +274,17 @@ func (s *Store) SaveDocument(ctx context.Context, in SaveDocumentInput) (SaveDoc
 	if tags == nil {
 		tags = []string{}
 	}
+	updatedAt := time.Now().UTC()
+	if in.UpdatedAt != nil && !in.UpdatedAt.IsZero() {
+		updatedAt = in.UpdatedAt.UTC()
+	}
 	nextRev := curRev + 1
 	if errors.Is(err, pgx.ErrNoRows) {
 		nextRev = 1
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO documents (id, project, name, doc_type, title, summary, tags, current_revision, source_agent)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-			id, in.Project, in.Name, in.DocType, title, in.Summary, tags, nextRev, in.SourceAgent); err != nil {
+			INSERT INTO documents (id, project, name, doc_type, title, summary, tags, current_revision, source_agent, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+			id, in.Project, in.Name, in.DocType, title, in.Summary, tags, nextRev, in.SourceAgent, updatedAt); err != nil {
 			return SaveDocumentResult{}, err
 		}
 	} else {
@@ -291,9 +296,9 @@ func (s *Store) SaveDocument(ctx context.Context, in SaveDocumentInput) (SaveDoc
 			    tags = CASE WHEN cardinality($5::text[]) > 0 THEN $5 ELSE tags END,
 			    current_revision = $6,
 			    source_agent = $7,
-			    updated_at = NOW()
+			    updated_at = $8
 			WHERE id = $1`,
-			id, in.DocType, title, in.Summary, tags, nextRev, in.SourceAgent); err != nil {
+			id, in.DocType, title, in.Summary, tags, nextRev, in.SourceAgent, updatedAt); err != nil {
 			return SaveDocumentResult{}, err
 		}
 	}

@@ -316,13 +316,15 @@ func TestWorkerIntegrationAndIdempotency(t *testing.T) {
 		t.Fatalf("expected 0 chat calls when source_hash matches, got %d", inf.chatCalls-chatsBefore)
 	}
 
-	// Verify distill_chat creates a doc_type=chat document with summary/tags, clears raw_excerpt, and updates brief.
+	// Verify distill_chat creates a doc_type=chat document with summary/tags, preserves session updated_at, clears raw_excerpt, and updates brief.
+	chatTime := time.Date(2026, 11, 18, 18, 0, 0, 0, time.UTC)
 	queued, err := st.UpsertChatSession(ctx, store.IngestChatInput{
 		SourceAgent: "antigravity",
 		ExternalID:  "97826401-98c5-47d1-911c-e5ce4b7fa8d6",
 		Project:     "krakozhia",
 		Title:       "Chat History Session",
 		RawExcerpt:  "User: Store all chat histories.\nAssistant: We will distill them into versioned chat documents.",
+		UpdatedAt:   &chatTime,
 	})
 	if err != nil || !queued {
 		t.Fatalf("UpsertChatSession = %v, %v", queued, err)
@@ -343,6 +345,9 @@ func TestWorkerIntegrationAndIdempotency(t *testing.T) {
 	chatDoc, err := st.GetDocument(ctx, *chatSession.DocumentID, 0)
 	if err != nil || chatDoc.DocType != "chat" || chatDoc.Summary == "" || len(chatDoc.Tags) == 0 {
 		t.Fatalf("distilled chat doc = %+v, err=%v", chatDoc, err)
+	}
+	if gotDate := chatDoc.UpdatedAt.UTC().Format(time.DateOnly); gotDate != "2026-11-18" {
+		t.Fatalf("distilled chat doc updated_at = %q, want 2026-11-18", gotDate)
 	}
 
 	// Verify GitHub roadmap distillation (embed_github_item, distill_org_roadmap, distill_project_roadmap)

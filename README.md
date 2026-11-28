@@ -80,7 +80,8 @@ Install the Claude Code plugin from this repository to enable automatic `recall`
 | `KRAKOZHIA_CHAT_MODEL` | `gemma-4-12b-it` | Chat model for distillation, roadmaps, and briefs |
 | `KRAKOZHIA_RERANK_MODEL` | `bge-reranker-v2-m3` | Optional cross-encoder rerank model |
 | `KRAKOZHIA_ENRICH_WORKERS` | `1` | Background GPU enrichment worker count |
-| `KRAKOZHIA_GITHUB_OWNERS` | empty | Comma-separated GitHub orgs or users to sync |
+| `KRAKOZHIA_GITHUB_OWNERS` | empty | Comma-separated GitHub orgs or users to sync with org roadmaps |
+| `KRAKOZHIA_GITHUB_REPOS` | empty | Comma-separated standalone `owner/repo` entries to sync without org roadmaps |
 | `KRAKOZHIA_GITHUB_TOKEN` | empty | Default GitHub read-only token |
 | `KRAKOZHIA_GITHUB_TOKENS` | empty | Per-owner `owner=token` overrides |
 | `KRAKOZHIA_GITHUB_SYNC_INTERVAL` | `2h` | GitHub polling interval |
