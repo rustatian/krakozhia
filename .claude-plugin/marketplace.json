@@ -1,0 +1,13 @@
+{
+  "name": "krakozhia",
+  "description": "Self-hosted AI knowledge base for project documents, memory notes, and benchmarks.",
+  "owner": {
+    "name": "rustatian"
+  },
+  "plugins": [
+    {
+      "name": "krakozhia",
+      "source": "./"
+    }
+  ]
+}

@@ -840,3 +840,53 @@ func (s *Store) UpdateNoteEmbedding(ctx context.Context, noteID string, emb []fl
 		UPDATE notes SET embedding = $2, updated_at = NOW() WHERE id = $1`, noteID, optionalVector(emb))
 	return err
 }
+
+// StoreStats reports row counts across knowledge base tables and job statuses.
+type StoreStats struct {
+	Documents    int64
+	Chunks       int64
+	Notes        int64
+	Benchmarks   int64
+	JobsByStatus map[string]int64
+}
+
+// Stats returns aggregate counts of records and enrichment jobs.
+func (s *Store) Stats(ctx context.Context) (StoreStats, error) {
+	stats := StoreStats{
+		JobsByStatus: map[string]int64{
+			"pending": 0,
+			"running": 0,
+			"done":    0,
+			"failed":  0,
+		},
+	}
+	err := s.pool.QueryRow(ctx, `
+		SELECT
+			(SELECT count(*) FROM documents),
+			(SELECT count(*) FROM chunks),
+			(SELECT count(*) FROM notes),
+			(SELECT count(*) FROM benchmarks)`).Scan(
+		&stats.Documents, &stats.Chunks, &stats.Notes, &stats.Benchmarks)
+	if err != nil {
+		return stats, err
+	}
+
+	rows, err := s.pool.Query(ctx, `
+		SELECT status, count(*)
+		FROM enrichment_jobs
+		GROUP BY status`)
+	if err != nil {
+		return stats, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var status string
+		var cnt int64
+		if err := rows.Scan(&status, &cnt); err != nil {
+			return stats, err
+		}
+		stats.JobsByStatus[status] = cnt
+	}
+	return stats, rows.Err()
+}
