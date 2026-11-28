@@ -31,7 +31,7 @@ type localManifest struct {
 // Run dispatches a CLI command and never exits with code 2.
 func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: krakozhia <serve|recall|search|sync|sync-chats|save|show|list|bench|brief|eval>")
+		return errors.New("usage: krakozhia <serve|recall|search|sync|sync-chats|sync-github|save|show|list|bench|brief|eval>")
 	}
 	switch args[0] {
 	case "recall":
@@ -42,6 +42,8 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return runSync(args[1:], stdout, stderr)
 	case "sync-chats":
 		return runSyncChats(args[1:], stdout, stderr)
+	case "sync-github":
+		return runSyncGitHub(stdout, stderr)
 	case "save":
 		return runSave(args[1:], stdout)
 	case "show":
@@ -238,6 +240,25 @@ func runSync(args []string, stdout, stderr io.Writer) error {
 	}
 	fmt.Fprintf(stdout, "sync: written=%d deleted=%d skipped=%d total=%d\n",
 		totalWritten, totalDeleted, len(warnings)+len(failedIDs), len(notes))
+	return nil
+}
+
+func runSyncGitHub(stdout, stderr io.Writer) error {
+	cfg, err := LoadConfig()
+	if err != nil {
+		return err
+	}
+	client := NewClient(cfg.URL, cfg.Token)
+	client.http.Timeout = 10 * time.Minute
+	sum, err := client.SyncGitHub(context.Background())
+	if err != nil {
+		return err
+	}
+	for _, e := range sum.Errors {
+		fmt.Fprintln(stderr, "sync-github error:", e)
+	}
+	fmt.Fprintf(stdout, "sync-github: owners=%d repos=%d items=%d changed=%d errors=%d\n",
+		sum.Owners, sum.ReposScanned, sum.ItemsUpserted, sum.ItemsChanged, len(sum.Errors))
 	return nil
 }
 

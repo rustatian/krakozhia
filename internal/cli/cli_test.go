@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/rustatian/krakozhia/internal/cli"
+	"github.com/rustatian/krakozhia/internal/githubsync"
 	"github.com/rustatian/krakozhia/internal/server"
 	"github.com/rustatian/krakozhia/internal/store"
 )
@@ -30,6 +31,8 @@ type fakeServerState struct {
 	noteResp       store.Note
 	listDocs       []store.Document
 	benchRows      []store.Benchmark
+	ghSyncResp     githubsync.SyncSummary
+	ghSyncCalls    int
 }
 
 func newTestAPIServer(t *testing.T, token string, st *fakeServerState) *httptest.Server {
@@ -74,6 +77,9 @@ func newTestAPIServer(t *testing.T, token string, st *fakeServerState) *httptest
 			_ = json.NewEncoder(w).Encode(server.IngestChatsResponse{
 				Queued: len(req.Chats),
 			})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/github/sync":
+			st.ghSyncCalls++
+			_ = json.NewEncoder(w).Encode(st.ghSyncResp)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/documents":
 			var req server.SaveDocumentRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -582,5 +588,27 @@ func TestSyncChatsCommand(t *testing.T) {
 	}
 	if st.ingestedChats[0].Chats[0].Project != "krakozhia" {
 		t.Fatalf("project = %q, want krakozhia", st.ingestedChats[0].Chats[0].Project)
+	}
+}
+
+func TestSyncGitHubCommand(t *testing.T) {
+	st := &fakeServerState{
+		ghSyncResp: githubsync.SyncSummary{
+			Owners:        3,
+			ReposScanned:  110,
+			ItemsUpserted: 240,
+			ItemsChanged:  18,
+		},
+	}
+	srv := newTestAPIServer(t, "secret-tok", st)
+	defer srv.Close()
+	_, _, _ = setupTestEnv(t, srv.URL, "secret-tok")
+
+	var out, errBuf bytes.Buffer
+	if err := cli.Run([]string{"sync-github"}, nil, &out, &errBuf); err != nil {
+		t.Fatalf("sync-github err = %v (stderr=%s)", err, errBuf.String())
+	}
+	if st.ghSyncCalls != 1 || !strings.Contains(out.String(), "owners=3 repos=110 items=240 changed=18 errors=0") {
+		t.Fatalf("unexpected sync-github output = %q (calls=%d)", out.String(), st.ghSyncCalls)
 	}
 }

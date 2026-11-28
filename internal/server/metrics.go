@@ -109,6 +109,8 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(&b, "krakozhia_records_total{kind=\"chunks\"} %d\n", stats.Chunks)
 	fmt.Fprintf(&b, "krakozhia_records_total{kind=\"notes\"} %d\n", stats.Notes)
 	fmt.Fprintf(&b, "krakozhia_records_total{kind=\"benchmarks\"} %d\n", stats.Benchmarks)
+	fmt.Fprintf(&b, "krakozhia_records_total{kind=\"github_repos\"} %d\n", stats.GitHubRepos)
+	fmt.Fprintf(&b, "krakozhia_records_total{kind=\"github_items\"} %d\n", stats.GitHubItems)
 
 	b.WriteString("# HELP krakozhia_enrichment_jobs Number of GPU enrichment jobs by status.\n")
 	b.WriteString("# TYPE krakozhia_enrichment_jobs gauge\n")

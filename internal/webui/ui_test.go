@@ -16,10 +16,12 @@ type fakeReader struct{}
 
 func (fakeReader) Stats(context.Context) (store.StoreStats, error) {
 	return store.StoreStats{
-		Documents: 1,
-		Chunks:    1,
-		Notes:     1,
-		Benchmarks: 1,
+		Documents:    1,
+		Chunks:       1,
+		Notes:        1,
+		Benchmarks:   1,
+		GitHubRepos:  2,
+		GitHubItems:  3,
 		JobsByStatus: map[string]int64{"done": 2},
 	}, nil
 }
@@ -28,7 +30,20 @@ func (fakeReader) ListProjects(context.Context) ([]string, error) {
 	return []string{"alpha", "beta"}, nil
 }
 
-func (fakeReader) ListDocuments(_ context.Context, project, _ string, _ int) ([]store.Document, error) {
+func (fakeReader) ListDocuments(_ context.Context, project, docType string, _ int) ([]store.Document, error) {
+	if docType == "roadmap" {
+		return []store.Document{{
+			ID:              "rapira-rs/org-roadmap",
+			Project:         "rapira-rs",
+			Name:            "org-roadmap",
+			DocType:         "roadmap",
+			Title:           "rapira-rs Organization Roadmap",
+			Summary:         "Unified broker and stream transport plans",
+			CurrentRevision: 1,
+			Revision:        1,
+			UpdatedAt:       time.Date(2026, 11, 28, 0, 0, 0, 0, time.UTC),
+		}}, nil
+	}
 	if project == "beta" {
 		return []store.Document{{
 			ID:              "beta/chat-claude-1234",
@@ -166,19 +181,65 @@ func (fakeReader) ListRecordLinks(context.Context, string, string) ([]store.Reco
 	}}, nil
 }
 
+func (fakeReader) ListReposForProject(_ context.Context, project string) ([]store.GitHubRepo, error) {
+	if project != "alpha" {
+		return nil, nil
+	}
+	return []store.GitHubRepo{{
+		FullName:    "rapira-rs/rapira",
+		Owner:       "rapira-rs",
+		Name:        "rapira",
+		Project:     "alpha",
+		Description: "Rust PHP server",
+	}}, nil
+}
+
+func (fakeReader) ListGitHubItems(_ context.Context, filter store.GitHubItemFilter) ([]store.GitHubItem, error) {
+	if filter.Project != "alpha" {
+		return nil, nil
+	}
+	return []store.GitHubItem{{
+		ID:                 "rapira-rs/rapira#issue:37",
+		RepoFullName:       "rapira-rs/rapira",
+		Owner:              "rapira-rs",
+		Project:            "alpha",
+		Kind:               "issue",
+		Number:             37,
+		State:              "open",
+		Title:              "Unified broker interface",
+		MilestoneTitle:     "v1.0",
+		SubIssuesTotal:     8,
+		SubIssuesCompleted: 5,
+		URL:                "https://github.com/rapira-rs/rapira/issues/37",
+		GitHubUpdatedAt:    time.Date(2026, 11, 28, 0, 0, 0, 0, time.UTC),
+	}}, nil
+}
+
 func TestWebUIRoutesAndReadOnlyEnforcement(t *testing.T) {
 	t.Parallel()
 
 	ui := webui.New(fakeReader{}, func(_ context.Context, p webui.SearchParams) ([]store.SearchHit, bool, error) {
-		return []store.SearchHit{{
-			Kind:       "doc",
-			ID:         "alpha/spec#0",
-			DocumentID: "alpha/spec",
-			Project:    "alpha",
-			Type:       "spec",
-			Title:      "Alpha Search Hit",
-			Snippet:    "Matched snippet for " + p.Query,
-		}}, false, nil
+		return []store.SearchHit{
+			{
+				Kind:       "doc",
+				ID:         "alpha/spec#0",
+				DocumentID: "alpha/spec",
+				Project:    "alpha",
+				Type:       "spec",
+				Title:      "Alpha Search Hit",
+				Snippet:    "Matched snippet for " + p.Query,
+			},
+			{
+				Kind:        "github",
+				ID:          "rapira-rs/rapira#issue:37",
+				Project:     "alpha",
+				Type:        "issue",
+				Title:       "Unified broker interface",
+				HeadingPath: "rapira-rs/rapira#37 [open]",
+				URL:         "https://github.com/rapira-rs/rapira/issues/37",
+				Snippet:     "Broker and stream architecture",
+			},
+		}, false, nil
 	})
 
 	cases := []struct {
@@ -196,16 +257,28 @@ func TestWebUIRoutesAndReadOnlyEnforcement(t *testing.T) {
 			wantStatus: http.StatusOK,
 			wantContains: []string{
 				"krakozhia",
+				`href="/roadmaps"`,
 				`href="/documents"`,
 				`href="/notes"`,
 				"alpha/spec",
 				"alpha/mem",
+				"3</strong> GitHub items",
 				"&lt;script&gt;alert(1)&lt;/script&gt;",
 			},
 			wantNotContain: []string{
 				"<script>alert(1)</script>",
 				"Recent Benchmarks",
 				`href="/benchmarks"`,
+			},
+		},
+		{
+			name:       "roadmaps page lists org and project roadmaps",
+			method:     http.MethodGet,
+			target:     "/roadmaps",
+			wantStatus: http.StatusOK,
+			wantContains: []string{
+				"rapira-rs/org-roadmap",
+				"Unified broker and stream transport plans",
 			},
 		},
 		{
@@ -236,15 +309,20 @@ func TestWebUIRoutesAndReadOnlyEnforcement(t *testing.T) {
 			wantContains: []string{
 				"Alpha Search Hit",
 				"Matched snippet for pgvector",
+				"https://github.com/rapira-rs/rapira/issues/37",
 			},
 		},
 		{
-			name:       "project page renders brief docs notes and benchmarks when present",
+			name:       "project page renders brief linked repos open tickets docs notes and benchmarks",
 			method:     http.MethodGet,
 			target:     "/projects/alpha",
 			wantStatus: http.StatusOK,
 			wantContains: []string{
 				"Brief text",
+				"Linked GitHub Repositories",
+				"rapira-rs/rapira",
+				"Unified broker interface",
+				"5/8",
 				"alpha/mem",
 				"Latest Benchmarks",
 				"42.5",

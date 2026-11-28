@@ -209,6 +209,18 @@ func formatPointer(h store.SearchHit, projectsDir string) (string, bool) {
 		return fmt.Sprintf("- %s%s (project %s, %s, saved %s). Read: krakozhia show %s",
 			cleanText(h.Title), heading, cleanText(h.Project), cleanText(h.Type), date, cleanText(h.ID)), true
 	}
+	if h.Kind == "github" {
+		ref := cleanText(h.HeadingPath)
+		if ref == "" {
+			ref = cleanText(h.ID)
+		}
+		if h.URL != "" {
+			return fmt.Sprintf("- %s (%s, project %s, %s, updated %s). URL: %s",
+				cleanText(h.Title), ref, cleanText(h.Project), cleanText(h.Type), date, cleanText(h.URL)), true
+		}
+		return fmt.Sprintf("- %s (%s, project %s, %s, updated %s)",
+			cleanText(h.Title), ref, cleanText(h.Project), cleanText(h.Type), date), true
+	}
 
 	desc := cleanText(truncateRunes(h.Description, maxDescRunes))
 	if desc == "" {

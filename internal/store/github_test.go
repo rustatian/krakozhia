@@ -154,6 +154,19 @@ func TestGitHubRoadmapStoreLifecycle(t *testing.T) {
 		t.Fatalf("ListGitHubItems = %+v, err=%v", listed, err)
 	}
 
+	// Verify hybrid search over github_items works through project alias ("core" -> "rapira-rs/rapira").
+	hits, err := s.SearchKnowledge(ctx, store.SearchQuery{
+		Form:        store.FormHybrid,
+		Text:        "AMQP Kafka broker transport trait",
+		QueryVector: unitVec(1024, 3, 1.0),
+		Kind:        "github",
+		Project:     "core",
+		Limit:       5,
+	})
+	if err != nil || len(hits) != 1 || hits[0].ID != item.ID || hits[0].URL != item.URL {
+		t.Fatalf("SearchKnowledge(github, project=core) = %+v, err=%v", hits, err)
+	}
+
 	// Verify UpsertChatSession registers project_repos from RepoFullName.
 	if _, err := s.UpsertChatSession(ctx, store.IngestChatInput{
 		SourceAgent:  "claude",
