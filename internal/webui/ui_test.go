@@ -215,6 +215,24 @@ func (fakeReader) ListGitHubItems(_ context.Context, filter store.GitHubItemFilt
 	}}, nil
 }
 
+func (fakeReader) ListEnrichmentJobs(_ context.Context, status string, _ int) ([]store.EnrichmentJob, error) {
+	ts := time.Date(2026, 11, 28, 12, 30, 0, 0, time.UTC)
+	jobs := []store.EnrichmentJob{
+		{ID: 42, JobType: "refresh_brief", TargetKind: "project", TargetID: "alpha", Status: "running", Attempts: 1, CreatedAt: ts, UpdatedAt: ts},
+		{ID: 41, JobType: "enrich_doc", TargetKind: "doc", TargetID: "alpha/spec", Status: "failed", Attempts: 5, LastError: "err <script>bad()</script>", CreatedAt: ts, UpdatedAt: ts},
+	}
+	if status == "" {
+		return jobs, nil
+	}
+	var out []store.EnrichmentJob
+	for _, j := range jobs {
+		if j.Status == status {
+			out = append(out, j)
+		}
+	}
+	return out, nil
+}
+
 func TestWebUIRoutesAndReadOnlyEnforcement(t *testing.T) {
 	t.Parallel()
 
@@ -261,6 +279,9 @@ func TestWebUIRoutesAndReadOnlyEnforcement(t *testing.T) {
 				`href="/roadmaps"`,
 				`href="/documents"`,
 				`href="/notes"`,
+				`href="/jobs"`,
+				`href="/document?id=alpha%2fspec"`,
+				`href="/note?id=alpha%2fmem"`,
 				"alpha/spec",
 				"alpha/mem",
 				"3</strong> GitHub items",
@@ -366,6 +387,35 @@ func TestWebUIRoutesAndReadOnlyEnforcement(t *testing.T) {
 			},
 			wantNotContain: []string{
 				"<img src=x onerror=alert(1)>",
+			},
+		},
+		{
+			name:       "jobs page renders live queue with escaped errors and target links",
+			method:     http.MethodGet,
+			target:     "/jobs",
+			wantStatus: http.StatusOK,
+			wantContains: []string{
+				`id="jobs-live"`,
+				"refresh_brief",
+				`href="/projects/alpha"`,
+				`href="/document?id=alpha%2fspec"`,
+				"err &lt;script&gt;bad()&lt;/script&gt;",
+			},
+			wantNotContain: []string{
+				"<script>bad()</script>",
+				"%252",
+			},
+		},
+		{
+			name:       "jobs page filters by status",
+			method:     http.MethodGet,
+			target:     "/jobs?status=running",
+			wantStatus: http.StatusOK,
+			wantContains: []string{
+				"refresh_brief",
+			},
+			wantNotContain: []string{
+				"enrich_doc",
 			},
 		},
 		{

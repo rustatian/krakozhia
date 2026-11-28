@@ -188,6 +188,8 @@ type EnrichmentJob struct {
 	Attempts   int       `json:"attempts"`
 	LastError  string    `json:"last_error"`
 	CreatedAt  time.Time `json:"created_at"`
+	RunAfter   time.Time `json:"run_after"`
+	UpdatedAt  time.Time `json:"updated_at"`
 }
 
 func hashContent(s string) string {
@@ -728,8 +730,8 @@ func (s *Store) ClaimNextJob(ctx context.Context) (*EnrichmentJob, error) {
 		SET status = 'running', attempts = e.attempts + 1, updated_at = NOW()
 		FROM next_job
 		WHERE e.id = next_job.id
-		RETURNING e.id, e.job_type, e.target_kind, e.target_id, e.status, e.attempts, e.last_error, e.created_at`).Scan(
-		&j.ID, &j.JobType, &j.TargetKind, &j.TargetID, &j.Status, &j.Attempts, &j.LastError, &j.CreatedAt)
+		RETURNING e.id, e.job_type, e.target_kind, e.target_id, e.status, e.attempts, e.last_error, e.created_at, e.run_after, e.updated_at`).Scan(
+		&j.ID, &j.JobType, &j.TargetKind, &j.TargetID, &j.Status, &j.Attempts, &j.LastError, &j.CreatedAt, &j.RunAfter, &j.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -768,6 +770,45 @@ func (s *Store) FailJob(ctx context.Context, id int64, errMsg string, retryDelay
 		    updated_at = NOW()
 		WHERE e.id = $1`, id, errMsg, retryDelay.Milliseconds(), maxAttempts)
 	return err
+}
+
+// ListEnrichmentJobs returns enrichment jobs filtered by optional status, prioritizing running, pending, failed, then done.
+func (s *Store) ListEnrichmentJobs(ctx context.Context, status string, limit int) ([]EnrichmentJob, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	status = strings.TrimSpace(status)
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, job_type, target_kind, target_id, status, attempts, last_error, created_at, run_after, updated_at
+		FROM enrichment_jobs
+		WHERE ($1 = '' OR status = $1)
+		ORDER BY
+			CASE status
+				WHEN 'running' THEN 0
+				WHEN 'pending' THEN 1
+				WHEN 'failed' THEN 2
+				ELSE 3
+			END ASC,
+			CASE WHEN status = 'pending' THEN run_after END ASC,
+			updated_at DESC,
+			id DESC
+		LIMIT $2`, status, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []EnrichmentJob
+	for rows.Next() {
+		var j EnrichmentJob
+		if err := rows.Scan(
+			&j.ID, &j.JobType, &j.TargetKind, &j.TargetID, &j.Status,
+			&j.Attempts, &j.LastError, &j.CreatedAt, &j.RunAfter, &j.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, j)
+	}
+	return out, rows.Err()
 }
 
 // UpdateDocumentEnrichment writes derived summary and tags onto documents.

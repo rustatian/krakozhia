@@ -23,7 +23,7 @@ flowchart LR
 | :--- | :--- | :--- |
 | `/mcp` | Bearer token | Streamable HTTP MCP server for Claude Code, Antigravity, Codex, and OpenCode |
 | `/api/v1/*` | Bearer token | JSON REST API for the CLI binary and hooks |
-| `/`, `/roadmaps`, `/projects/{project}` | Read-only | HTML browser for projects, roadmaps, documents, notes, search, and benchmarks |
+| `/`, `/roadmaps`, `/projects/{project}`, `/jobs` | Read-only | HTML browser for projects, roadmaps, documents, notes, live jobs, search, and benchmarks |
 | `/healthz`, `/metrics` | None | Health probes and Prometheus metrics |
 
 ## Quick Start

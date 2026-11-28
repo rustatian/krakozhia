@@ -29,6 +29,7 @@ type Reader interface {
 	ListRecordLinks(ctx context.Context, targetKind, targetID string) ([]store.RecordLink, error)
 	ListReposForProject(ctx context.Context, project string) ([]store.GitHubRepo, error)
 	ListGitHubItems(ctx context.Context, filter store.GitHubItemFilter) ([]store.GitHubItem, error)
+	ListEnrichmentJobs(ctx context.Context, status string, limit int) ([]store.EnrichmentJob, error)
 }
 
 // SearchParams configures a UI search query.
@@ -58,13 +59,18 @@ func New(reader Reader, search SearchFunc) http.Handler {
 			}
 			return t.UTC().Format(time.DateOnly)
 		},
+		"fmtTime": func(t time.Time) string {
+			if t.IsZero() {
+				return "-"
+			}
+			return t.UTC().Format("2006-01-02 15:04:05")
+		},
 		"fmtDelta": func(d *float64) string {
 			if d == nil {
 				return "-"
 			}
 			return fmt.Sprintf("%+.2f%%", *d)
 		},
-		"urlEscape":  url.QueryEscape,
 		"pathEscape": url.PathEscape,
 	}
 	tmpl := template.Must(template.New("ui").Funcs(funcs).Parse(uiTemplates))
@@ -82,6 +88,7 @@ func New(reader Reader, search SearchFunc) http.Handler {
 	u.mux.HandleFunc("GET /projects/{project}", u.handleProject)
 	u.mux.HandleFunc("GET /document", u.handleDocument)
 	u.mux.HandleFunc("GET /note", u.handleNote)
+	u.mux.HandleFunc("GET /jobs", u.handleJobs)
 	u.mux.HandleFunc("GET /benchmarks", u.handleBenchmarks)
 	return u
 }
@@ -315,6 +322,33 @@ func (u *UI) handleNote(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (u *UI) handleJobs(w http.ResponseWriter, r *http.Request) {
+	status := strings.TrimSpace(r.URL.Query().Get("status"))
+	switch status {
+	case "", "running", "pending", "failed", "done":
+	default:
+		status = ""
+	}
+	ctx := r.Context()
+	stats, err := u.reader.Stats(ctx)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jobs, err := u.reader.ListEnrichmentJobs(ctx, status, 100)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	u.render(w, "jobs", map[string]any{
+		"Title":      "Jobs - krakozhia",
+		"Status":     status,
+		"Stats":      stats,
+		"Jobs":       jobs,
+		"RenderedAt": time.Now().UTC(),
+	})
+}
+
 func (u *UI) handleBenchmarks(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	rows, err := u.reader.QueryBenchmarks(r.Context(), store.BenchmarkFilter{
@@ -369,6 +403,14 @@ const uiTemplates = `
   .projects { display: flex; flex-wrap: wrap; gap: 0.45rem; list-style: none; padding: 0.65rem; margin: 0.5rem 0 1.5rem; max-height: 14rem; overflow-y: auto; border: 1px solid #8884; border-radius: 6px; }
   .projects a { display: inline-block; padding: 0.2rem 0.55rem; border: 1px solid #8884; border-radius: 5px; text-decoration: none; font-size: 0.9rem; }
   .projects a:hover { border-color: currentColor; }
+  .stat-link { text-decoration: none; color: inherit; }
+  .stat.active { border-color: currentColor; }
+  .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; margin-bottom: 1rem; }
+  .badge { display: inline-block; padding: 0.1rem 0.45rem; border-radius: 4px; font-size: 0.82rem; font-weight: 600; }
+  .st-running { background: #2563eb28; color: #3b82f6; border: 1px solid #3b82f688; }
+  .st-pending { background: #d9770624; color: #f59e0b; border: 1px solid #f59e0b88; }
+  .st-failed { background: #dc262628; color: #ef4444; border: 1px solid #ef444488; }
+  .st-done { background: #16a34a24; color: #22c55e; border: 1px solid #22c55e88; }
 </style>
 </head>
 <body>
@@ -379,6 +421,7 @@ const uiTemplates = `
     <a href="/roadmaps">Roadmaps</a>
     <a href="/documents">Documents</a>
     <a href="/notes">Notes</a>
+    <a href="/jobs">Jobs</a>
   </nav>
   <form class="search" action="/search" method="get">
     <input type="search" name="q" placeholder="Search chats, docs, notes, and tickets..." required>
@@ -395,7 +438,7 @@ const uiTemplates = `
   <div class="stat"><strong>{{.Stats.Documents}}</strong> documents &amp; chats</div>
   <div class="stat"><strong>{{.Stats.Notes}}</strong> notes</div>
   {{if .Stats.GitHubItems}}<div class="stat"><strong>{{.Stats.GitHubItems}}</strong> GitHub items</div>{{end}}
-  <div class="stat">jobs pending: <strong>{{index .Stats.JobsByStatus "pending"}}</strong></div>
+  <a class="stat-link" href="/jobs"><div class="stat">jobs: <strong>{{index .Stats.JobsByStatus "running"}}</strong> running, <strong>{{index .Stats.JobsByStatus "pending"}}</strong> pending</div></a>
 </div>
 
 <h2>Projects</h2>
@@ -412,7 +455,7 @@ const uiTemplates = `
   <tbody>
   {{range .Documents}}
     <tr>
-      <td><a href="/document?id={{urlEscape .ID}}">{{.ID}}</a></td>
+      <td><a href="/document?id={{.ID}}">{{.ID}}</a></td>
       <td>{{.DocType}}</td>
       <td>{{.Title}}</td>
       <td class="muted">{{.Summary}}</td>
@@ -430,7 +473,7 @@ const uiTemplates = `
   <tbody>
   {{range .Notes}}
     <tr>
-      <td><a href="/note?id={{urlEscape .ID}}">{{.ID}}</a></td>
+      <td><a href="/note?id={{.ID}}">{{.ID}}</a></td>
       <td><a href="/projects/{{pathEscape .Project}}">{{.Project}}</a></td>
       <td>{{.NoteType}}</td>
       <td class="muted">{{if .Summary}}{{.Summary}}{{else}}{{.Description}}{{end}}</td>
@@ -452,7 +495,7 @@ const uiTemplates = `
   <tbody>
   {{range .Roadmaps}}
     <tr>
-      <td><a href="/document?id={{urlEscape .ID}}">{{.ID}}</a></td>
+      <td><a href="/document?id={{.ID}}">{{.ID}}</a></td>
       <td><a href="/projects/{{pathEscape .Project}}">{{.Project}}</a></td>
       <td>{{.Title}}</td>
       <td class="muted">{{.Summary}}</td>
@@ -479,7 +522,7 @@ const uiTemplates = `
   <tbody>
   {{range .Documents}}
     <tr>
-      <td><a href="/document?id={{urlEscape .ID}}">{{.ID}}</a></td>
+      <td><a href="/document?id={{.ID}}">{{.ID}}</a></td>
       <td><a href="/projects/{{pathEscape .Project}}">{{.Project}}</a></td>
       <td>{{.DocType}}</td>
       <td>{{.CurrentRevision}}</td>
@@ -508,7 +551,7 @@ const uiTemplates = `
   <tbody>
   {{range .Notes}}
     <tr>
-      <td><a href="/note?id={{urlEscape .ID}}">{{.ID}}</a></td>
+      <td><a href="/note?id={{.ID}}">{{.ID}}</a></td>
       <td><a href="/projects/{{pathEscape .Project}}">{{.Project}}</a></td>
       <td>{{.NoteType}}</td>
       <td>{{.Name}}</td>
@@ -534,9 +577,9 @@ const uiTemplates = `
     <tr>
       <td>{{.Kind}}</td>
       <td>
-        {{if eq .Kind "doc"}}<a href="/document?id={{urlEscape .DocumentID}}">{{.ID}}</a>
+        {{if eq .Kind "doc"}}<a href="/document?id={{.DocumentID}}">{{.ID}}</a>
         {{else if eq .Kind "github"}}{{if .URL}}<a href="{{.URL}}" target="_blank" rel="noopener noreferrer">{{.ID}}</a>{{else}}{{.ID}}{{end}}
-        {{else}}<a href="/note?id={{urlEscape .ID}}">{{.ID}}</a>{{end}}
+        {{else}}<a href="/note?id={{.ID}}">{{.ID}}</a>{{end}}
       </td>
       <td>{{.Title}}{{if .HeadingPath}} <span class="muted">({{.HeadingPath}})</span>{{end}}</td>
       <td class="muted">{{.Snippet}}</td>
@@ -589,7 +632,7 @@ const uiTemplates = `
   <tbody>
   {{range .Documents}}
     <tr>
-      <td><a href="/document?id={{urlEscape .ID}}">{{.ID}}</a></td>
+      <td><a href="/document?id={{.ID}}">{{.ID}}</a></td>
       <td>{{.DocType}}</td>
       <td>{{.CurrentRevision}}</td>
       <td>{{.Title}}</td>
@@ -608,7 +651,7 @@ const uiTemplates = `
   <tbody>
   {{range .Notes}}
     <tr>
-      <td><a href="/note?id={{urlEscape .ID}}">{{.ID}}</a></td>
+      <td><a href="/note?id={{.ID}}">{{.ID}}</a></td>
       <td>{{.NoteType}}</td>
       <td class="muted">{{.Description}}</td>
       <td>{{fmtDate .UpdatedAt}}</td>
@@ -652,7 +695,7 @@ const uiTemplates = `
 {{if .Links}}
 <h2>Advisory Links</h2>
 <ul>
-{{range .Links}}<li>{{.Relation}}: <a href="/document?id={{urlEscape .SourceID}}">{{.SourceID}}</a> ({{.Note}})</li>{{end}}
+{{range .Links}}<li>{{.Relation}}: <a href="/document?id={{.SourceID}}">{{.SourceID}}</a> ({{.Note}})</li>{{end}}
 </ul>
 {{end}}
 
@@ -680,6 +723,69 @@ const uiTemplates = `
 {{if .Note.Summary}}<p><strong>Summary:</strong> {{.Note.Summary}}</p>{{end}}
 {{if .Note.Tags}}<p>{{range .Note.Tags}}<span class="tag">{{.}}</span>{{end}}</p>{{end}}
 <pre>{{.Note.Content}}</pre>
+{{template "foot" .}}
+{{end}}
+
+{{define "jobs"}}
+{{template "head" .}}
+<div class="toolbar">
+  <h1 style="margin:0;margin-right:auto">Processing Jobs</h1>
+  <button type="button" id="jobs-toggle">Pause live updates</button>
+</div>
+<div id="jobs-live">
+<div class="stats">
+  <a class="stat-link" href="/jobs"><div class="stat{{if eq .Status ""}} active{{end}}">All</div></a>
+  <a class="stat-link" href="/jobs?status=running"><div class="stat{{if eq .Status "running"}} active{{end}}"><strong>{{index .Stats.JobsByStatus "running"}}</strong> running</div></a>
+  <a class="stat-link" href="/jobs?status=pending"><div class="stat{{if eq .Status "pending"}} active{{end}}"><strong>{{index .Stats.JobsByStatus "pending"}}</strong> pending</div></a>
+  <a class="stat-link" href="/jobs?status=failed"><div class="stat{{if eq .Status "failed"}} active{{end}}"><strong>{{index .Stats.JobsByStatus "failed"}}</strong> failed</div></a>
+  <a class="stat-link" href="/jobs?status=done"><div class="stat{{if eq .Status "done"}} active{{end}}"><strong>{{index .Stats.JobsByStatus "done"}}</strong> done</div></a>
+  <div class="stat muted">updated {{fmtTime .RenderedAt}} UTC</div>
+</div>
+{{if .Jobs}}
+<table>
+  <thead><tr><th>ID</th><th>Status</th><th>Job</th><th>Target</th><th>Attempts</th><th>Updated (UTC)</th><th>Error</th></tr></thead>
+  <tbody>
+  {{range .Jobs}}
+    <tr>
+      <td>{{.ID}}</td>
+      <td><span class="badge st-{{.Status}}">{{.Status}}</span></td>
+      <td><code>{{.JobType}}</code></td>
+      <td>
+        {{if eq .TargetKind "doc"}}<a href="/document?id={{.TargetID}}">{{.TargetID}}</a>
+        {{else if eq .TargetKind "note"}}<a href="/note?id={{.TargetID}}">{{.TargetID}}</a>
+        {{else if eq .TargetKind "project"}}<a href="/projects/{{pathEscape .TargetID}}">{{.TargetID}}</a>
+        {{else}}<code>{{.TargetKind}}:{{.TargetID}}</code>{{end}}
+      </td>
+      <td>{{.Attempts}}</td>
+      <td class="muted">{{fmtTime .UpdatedAt}}</td>
+      <td class="muted">{{.LastError}}</td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+{{else}}<p class="muted">No matching jobs.</p>{{end}}
+</div>
+<script>
+(() => {
+  let paused = false;
+  const btn = document.getElementById("jobs-toggle");
+  btn.addEventListener("click", () => {
+    paused = !paused;
+    btn.textContent = paused ? "Resume live updates" : "Pause live updates";
+  });
+  setInterval(async () => {
+    if (paused || document.hidden) return;
+    try {
+      const res = await fetch(window.location.href, { cache: "no-store" });
+      if (!res.ok) return;
+      const doc = new DOMParser().parseFromString(await res.text(), "text/html");
+      const next = doc.getElementById("jobs-live");
+      const cur = document.getElementById("jobs-live");
+      if (next && cur) cur.replaceWith(next);
+    } catch (_) {}
+  }, 3000);
+})();
+</script>
 {{template "foot" .}}
 {{end}}
 

@@ -722,4 +722,23 @@ func TestRecencySupersedeAndJobQueue(t *testing.T) {
 	if err != nil || j3 == nil || j3.ID != j2.ID {
 		t.Fatalf("expected reclaimed job %d, got %+v err=%v", j2.ID, j3, err)
 	}
+
+	// Verify ListEnrichmentJobs orders running -> pending -> failed -> done and supports status filter.
+	if err := s.EnqueueJob(ctx, "enrich_doc", "doc", "krakozhia/new-design"); err != nil {
+		t.Fatalf("EnqueueJob pending: %v", err)
+	}
+	if err := s.Exec(ctx, `INSERT INTO enrichment_jobs (job_type, target_kind, target_id, status, attempts, last_error) VALUES ('enrich_note', 'note', 'krakozhia/bad', 'failed', 5, 'gpu timeout')`); err != nil {
+		t.Fatalf("insert failed job: %v", err)
+	}
+	allJobs, err := s.ListEnrichmentJobs(ctx, "", 10)
+	if err != nil || len(allJobs) < 4 {
+		t.Fatalf("ListEnrichmentJobs all = %+v, err=%v", allJobs, err)
+	}
+	if allJobs[0].Status != "running" || allJobs[1].Status != "pending" || allJobs[2].Status != "failed" || allJobs[3].Status != "done" {
+		t.Fatalf("unexpected status priority order: %q, %q, %q, %q", allJobs[0].Status, allJobs[1].Status, allJobs[2].Status, allJobs[3].Status)
+	}
+	failedOnly, err := s.ListEnrichmentJobs(ctx, "failed", 10)
+	if err != nil || len(failedOnly) != 1 || failedOnly[0].LastError != "gpu timeout" {
+		t.Fatalf("ListEnrichmentJobs failed = %+v, err=%v", failedOnly, err)
+	}
 }
