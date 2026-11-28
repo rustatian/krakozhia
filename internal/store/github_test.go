@@ -65,6 +65,15 @@ func TestGitHubRoadmapStoreLifecycle(t *testing.T) {
 	if err := s.UpsertProjectRepo(ctx, "core", "rapira-rs/rapira"); err != nil {
 		t.Fatalf("UpsertProjectRepo: %v", err)
 	}
+	// Because rapira-rs/rapira already has a sync_hash and core/roadmap does not exist yet,
+	// UpsertProjectRepo must enqueue distill_project_roadmap for "core".
+	aliasJob, err := s.ClaimNextJob(ctx)
+	if err != nil || aliasJob == nil || aliasJob.JobType != "distill_project_roadmap" || aliasJob.TargetID != "core" {
+		t.Fatalf("expected distill_project_roadmap for core, got %+v, err=%v", aliasJob, err)
+	}
+	if err := s.CompleteJob(ctx, aliasJob.ID); err != nil {
+		t.Fatalf("CompleteJob aliasJob: %v", err)
+	}
 
 	repos, err := s.ListReposForProject(ctx, "core")
 	if err != nil || len(repos) != 1 || repos[0].FullName != "rapira-rs/rapira" {
@@ -149,8 +158,28 @@ func TestGitHubRoadmapStoreLifecycle(t *testing.T) {
 		t.Fatalf("GetGitHubItem = %+v, err=%v", got, err)
 	}
 
+	// Verify unlabeled GitHub items (nil Labels slice) persist as empty TEXT[] instead of SQL NULL.
+	unlabeled := store.GitHubItem{
+		ID:              "rapira-rs/rapira#issue:99",
+		RepoFullName:    "rapira-rs/rapira",
+		Owner:           "rapira-rs",
+		Project:         "rapira",
+		Kind:            "issue",
+		Number:          99,
+		State:           "open",
+		Title:           "Unlabeled roadmap issue",
+		Body:            "Verify empty labels slice does not trigger SQLSTATE 23502.",
+		Labels:          nil,
+		URL:             "https://github.com/rapira-rs/rapira/issues/99",
+		GitHubCreatedAt: now,
+		GitHubUpdatedAt: now,
+	}
+	if changed, err := s.UpsertGitHubItem(ctx, unlabeled); err != nil || !changed {
+		t.Fatalf("UpsertGitHubItem(nil labels) = (%v, %v), want (true, nil)", changed, err)
+	}
+
 	listed, err := s.ListGitHubItems(ctx, store.GitHubItemFilter{Owner: "rapira-rs", State: "open"})
-	if err != nil || len(listed) != 1 || listed[0].ID != item.ID {
+	if err != nil || len(listed) != 2 || listed[0].ID != item.ID {
 		t.Fatalf("ListGitHubItems = %+v, err=%v", listed, err)
 	}
 

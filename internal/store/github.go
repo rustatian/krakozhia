@@ -99,6 +99,7 @@ func ParseGitHubRepo(fullName string) (owner, name string, ok bool) {
 }
 
 // UpsertProjectRepo binds a krakozhia project name to a GitHub owner/repo slug.
+// When the repository is already synced and the project lacks a roadmap document, it queues distill_project_roadmap.
 func (s *Store) UpsertProjectRepo(ctx context.Context, project, repoFullName string) error {
 	project = strings.TrimSpace(project)
 	owner, name, ok := ParseGitHubRepo(repoFullName)
@@ -106,13 +107,29 @@ func (s *Store) UpsertProjectRepo(ctx context.Context, project, repoFullName str
 		return errors.New("valid project and owner/repo full_name are required")
 	}
 	full := owner + "/" + name
-	_, err := s.pool.Exec(ctx, `
+	if _, err := s.pool.Exec(ctx, `
 		INSERT INTO project_repos (project, repo_full_name, owner, updated_at)
 		VALUES ($1, $2, $3, NOW())
 		ON CONFLICT (project, repo_full_name) DO UPDATE SET
 			owner = EXCLUDED.owner,
-			updated_at = NOW()`, project, full, owner)
-	return err
+			updated_at = NOW()`, project, full, owner); err != nil {
+		return err
+	}
+
+	var shouldQueue bool
+	if err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM github_repos
+			WHERE full_name = $1 AND NOT is_archived AND sync_hash <> ''
+		) AND NOT EXISTS (
+			SELECT 1 FROM documents WHERE id = $2
+		)`, full, project+"/roadmap").Scan(&shouldQueue); err != nil {
+		return err
+	}
+	if shouldQueue {
+		return s.EnqueueJob(ctx, "distill_project_roadmap", "project", project)
+	}
+	return nil
 }
 
 func upsertProjectRepoTx(ctx context.Context, tx pgx.Tx, project, repoFullName string) error {
@@ -562,7 +579,7 @@ func scanStrings(rows pgx.Rows) ([]string, error) {
 }
 
 func cleanGitHubLabels(in []string) []string {
-	var out []string
+	out := make([]string, 0, len(in))
 	for _, l := range in {
 		v := strings.ToLower(strings.TrimSpace(l))
 		if v == "" || slices.Contains(out, v) {
