@@ -366,6 +366,9 @@ const uiTemplates = `
   .stat { border: 1px solid #8884; border-radius: 6px; padding: 0.6rem 0.9rem; }
   .muted { opacity: 0.75; font-size: 0.9rem; }
   .tag { display: inline-block; border: 1px solid #8886; border-radius: 4px; padding: 0.1rem 0.4rem; margin-right: 0.3rem; font-size: 0.85rem; }
+  .projects { display: flex; flex-wrap: wrap; gap: 0.45rem; list-style: none; padding: 0.65rem; margin: 0.5rem 0 1.5rem; max-height: 14rem; overflow-y: auto; border: 1px solid #8884; border-radius: 6px; }
+  .projects a { display: inline-block; padding: 0.2rem 0.55rem; border: 1px solid #8884; border-radius: 5px; text-decoration: none; font-size: 0.9rem; }
+  .projects a:hover { border-color: currentColor; }
 </style>
 </head>
 <body>
@@ -397,7 +400,7 @@ const uiTemplates = `
 
 <h2>Projects</h2>
 {{if .Projects}}
-<ul>
+<ul class="projects">
 {{range .Projects}}<li><a href="/projects/{{pathEscape .}}">{{.}}</a></li>{{end}}
 </ul>
 {{else}}<p class="muted">No projects indexed yet.</p>{{end}}

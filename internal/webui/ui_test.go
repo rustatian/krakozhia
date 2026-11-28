@@ -257,6 +257,7 @@ func TestWebUIRoutesAndReadOnlyEnforcement(t *testing.T) {
 			wantStatus: http.StatusOK,
 			wantContains: []string{
 				"krakozhia",
+				`class="projects"`,
 				`href="/roadmaps"`,
 				`href="/documents"`,
 				`href="/notes"`,
