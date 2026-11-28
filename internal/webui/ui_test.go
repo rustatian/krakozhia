@@ -25,10 +25,23 @@ func (fakeReader) Stats(context.Context) (store.StoreStats, error) {
 }
 
 func (fakeReader) ListProjects(context.Context) ([]string, error) {
-	return []string{"alpha"}, nil
+	return []string{"alpha", "beta"}, nil
 }
 
 func (fakeReader) ListDocuments(_ context.Context, project, _ string, _ int) ([]store.Document, error) {
+	if project == "beta" {
+		return []store.Document{{
+			ID:              "beta/chat-claude-1234",
+			Project:         "beta",
+			Name:            "chat-claude-1234",
+			DocType:         "chat",
+			Title:           "Beta Session",
+			Summary:         "Discussed architecture",
+			CurrentRevision: 1,
+			Revision:        1,
+			UpdatedAt:       time.Date(2026, 11, 28, 0, 0, 0, 0, time.UTC),
+		}}, nil
+	}
 	if project != "" && project != "alpha" {
 		return nil, nil
 	}
@@ -109,7 +122,10 @@ func (fakeReader) GetNote(_ context.Context, id string) (store.Note, error) {
 	}, nil
 }
 
-func (fakeReader) QueryBenchmarks(context.Context, store.BenchmarkFilter) ([]store.Benchmark, error) {
+func (fakeReader) QueryBenchmarks(_ context.Context, filter store.BenchmarkFilter) ([]store.Benchmark, error) {
+	if filter.Project == "beta" {
+		return nil, nil
+	}
 	d := -12.5
 	return []store.Benchmark{{
 		ID:          1,
@@ -174,18 +190,42 @@ func TestWebUIRoutesAndReadOnlyEnforcement(t *testing.T) {
 		wantNotContain []string
 	}{
 		{
-			name:       "home page lists projects docs benchmarks and escapes HTML",
+			name:       "home page lists projects docs notes and omits benchmarks",
 			method:     http.MethodGet,
 			target:     "/",
 			wantStatus: http.StatusOK,
 			wantContains: []string{
 				"krakozhia",
+				`href="/documents"`,
+				`href="/notes"`,
 				"alpha/spec",
-				"42.5 ms",
+				"alpha/mem",
 				"&lt;script&gt;alert(1)&lt;/script&gt;",
 			},
 			wantNotContain: []string{
 				"<script>alert(1)</script>",
+				"Recent Benchmarks",
+				`href="/benchmarks"`,
+			},
+		},
+		{
+			name:       "documents browse page renders documents",
+			method:     http.MethodGet,
+			target:     "/documents?project=beta",
+			wantStatus: http.StatusOK,
+			wantContains: []string{
+				"beta/chat-claude-1234",
+				"Beta Session",
+			},
+		},
+		{
+			name:       "notes browse page renders notes",
+			method:     http.MethodGet,
+			target:     "/notes?project=alpha",
+			wantStatus: http.StatusOK,
+			wantContains: []string{
+				"alpha/mem",
+				"Note sum",
 			},
 		},
 		{
@@ -199,14 +239,27 @@ func TestWebUIRoutesAndReadOnlyEnforcement(t *testing.T) {
 			},
 		},
 		{
-			name:       "project page renders brief docs notes and benchmarks",
+			name:       "project page renders brief docs notes and benchmarks when present",
 			method:     http.MethodGet,
 			target:     "/projects/alpha",
 			wantStatus: http.StatusOK,
 			wantContains: []string{
 				"Brief text",
 				"alpha/mem",
+				"Latest Benchmarks",
 				"42.5",
+			},
+		},
+		{
+			name:       "project page hides benchmarks section when none recorded",
+			method:     http.MethodGet,
+			target:     "/projects/beta",
+			wantStatus: http.StatusOK,
+			wantContains: []string{
+				"Beta Session",
+			},
+			wantNotContain: []string{
+				"Latest Benchmarks",
 			},
 		},
 		{

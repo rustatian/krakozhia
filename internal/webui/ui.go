@@ -76,6 +76,8 @@ func New(reader Reader, search SearchFunc) http.Handler {
 		tmpl:   tmpl,
 	}
 	u.mux.HandleFunc("GET /{$}", u.handleHome)
+	u.mux.HandleFunc("GET /documents", u.handleDocuments)
+	u.mux.HandleFunc("GET /notes", u.handleNotes)
 	u.mux.HandleFunc("GET /search", u.handleSearch)
 	u.mux.HandleFunc("GET /projects/{project}", u.handleProject)
 	u.mux.HandleFunc("GET /document", u.handleDocument)
@@ -110,17 +112,51 @@ func (u *UI) handleHome(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	benches, err := u.reader.QueryBenchmarks(ctx, store.BenchmarkFilter{Limit: 15})
+	notes, err := u.reader.ListNotes(ctx, "", "", 15)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	u.render(w, "home", map[string]any{
-		"Title":      "krakozhia knowledge base",
-		"Stats":      stats,
-		"Projects":   projects,
-		"Documents":  docs,
-		"Benchmarks": benches,
+		"Title":     "krakozhia knowledge base",
+		"Stats":     stats,
+		"Projects":  projects,
+		"Documents": docs,
+		"Notes":     notes,
+	})
+}
+
+func (u *UI) handleDocuments(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	project := strings.TrimSpace(q.Get("project"))
+	docType := strings.TrimSpace(q.Get("type"))
+	docs, err := u.reader.ListDocuments(r.Context(), project, docType, 100)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	u.render(w, "documents", map[string]any{
+		"Title":     "Documents and Chats - krakozhia",
+		"Project":   project,
+		"DocType":   docType,
+		"Documents": docs,
+	})
+}
+
+func (u *UI) handleNotes(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	project := strings.TrimSpace(q.Get("project"))
+	noteType := strings.TrimSpace(q.Get("type"))
+	notes, err := u.reader.ListNotes(r.Context(), project, noteType, 100)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	u.render(w, "notes", map[string]any{
+		"Title":    "Memory Notes - krakozhia",
+		"Project":  project,
+		"NoteType": noteType,
+		"Notes":    notes,
 	})
 }
 
@@ -313,10 +349,11 @@ const uiTemplates = `
   <a href="/">krakozhia</a>
   <nav>
     <a href="/">Overview</a>
-    <a href="/benchmarks">Benchmarks</a>
+    <a href="/documents">Documents</a>
+    <a href="/notes">Notes</a>
   </nav>
   <form class="search" action="/search" method="get">
-    <input type="search" name="q" placeholder="Search docs and notes..." required>
+    <input type="search" name="q" placeholder="Search chats, docs, and notes..." required>
     <button type="submit">Search</button>
   </form>
 </header>
@@ -326,10 +363,9 @@ const uiTemplates = `
 {{define "home"}}
 {{template "head" .}}
 <div class="stats">
-  <div class="stat"><strong>{{.Stats.Documents}}</strong> documents</div>
-  <div class="stat"><strong>{{.Stats.Chunks}}</strong> chunks</div>
+  <div class="stat"><strong>{{len .Projects}}</strong> projects</div>
+  <div class="stat"><strong>{{.Stats.Documents}}</strong> documents &amp; chats</div>
   <div class="stat"><strong>{{.Stats.Notes}}</strong> notes</div>
-  <div class="stat"><strong>{{.Stats.Benchmarks}}</strong> benchmarks</div>
   <div class="stat">jobs pending: <strong>{{index .Stats.JobsByStatus "pending"}}</strong></div>
 </div>
 
@@ -340,7 +376,7 @@ const uiTemplates = `
 </ul>
 {{else}}<p class="muted">No projects indexed yet.</p>{{end}}
 
-<h2>Recent Documents</h2>
+<h2>Recent Documents and Chats</h2>
 {{if .Documents}}
 <table>
   <thead><tr><th>ID</th><th>Type</th><th>Title</th><th>Summary</th><th>Updated</th></tr></thead>
@@ -356,27 +392,82 @@ const uiTemplates = `
   {{end}}
   </tbody>
 </table>
-{{else}}<p class="muted">No documents saved yet.</p>{{end}}
+{{else}}<p class="muted">No documents or chats saved yet.</p>{{end}}
 
-<h2>Recent Benchmarks</h2>
-{{if .Benchmarks}}
+<h2>Recent Memory Notes</h2>
+{{if .Notes}}
 <table>
-  <thead><tr><th>Project</th><th>Suite</th><th>Metric</th><th>Value</th><th>Delta</th><th>Status</th><th>Date</th></tr></thead>
+  <thead><tr><th>ID</th><th>Project</th><th>Type</th><th>Description</th><th>Updated</th></tr></thead>
   <tbody>
-  {{range .Benchmarks}}
+  {{range .Notes}}
     <tr>
-      <td><a href="/benchmarks?project={{urlEscape .Project}}">{{.Project}}</a></td>
-      <td>{{.Suite}}</td>
-      <td>{{.Metric}}</td>
-      <td>{{.Value}} {{.Unit}}</td>
-      <td>{{fmtDelta .DeltaPct}}</td>
-      <td>{{.Status}}</td>
-      <td>{{fmtDate .RecordedAt}}</td>
+      <td><a href="/note?id={{urlEscape .ID}}">{{.ID}}</a></td>
+      <td><a href="/projects/{{pathEscape .Project}}">{{.Project}}</a></td>
+      <td>{{.NoteType}}</td>
+      <td class="muted">{{if .Summary}}{{.Summary}}{{else}}{{.Description}}{{end}}</td>
+      <td>{{fmtDate .UpdatedAt}}</td>
     </tr>
   {{end}}
   </tbody>
 </table>
-{{else}}<p class="muted">No benchmarks recorded yet.</p>{{end}}
+{{else}}<p class="muted">No notes synced yet.</p>{{end}}
+{{template "foot" .}}
+{{end}}
+
+{{define "documents"}}
+{{template "head" .}}
+<h1>Documents and Chats</h1>
+<form class="search" action="/documents" method="get">
+  <input type="text" name="project" value="{{.Project}}" placeholder="Project">
+  <input type="text" name="type" value="{{.DocType}}" placeholder="Type (chat, spec, plan, report)">
+  <button type="submit">Filter</button>
+</form>
+{{if .Documents}}
+<table>
+  <thead><tr><th>ID</th><th>Project</th><th>Type</th><th>Rev</th><th>Title</th><th>Summary</th><th>Updated</th></tr></thead>
+  <tbody>
+  {{range .Documents}}
+    <tr>
+      <td><a href="/document?id={{urlEscape .ID}}">{{.ID}}</a></td>
+      <td><a href="/projects/{{pathEscape .Project}}">{{.Project}}</a></td>
+      <td>{{.DocType}}</td>
+      <td>{{.CurrentRevision}}</td>
+      <td>{{.Title}}</td>
+      <td class="muted">{{.Summary}}</td>
+      <td>{{fmtDate .UpdatedAt}}</td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+{{else}}<p class="muted">No matching documents.</p>{{end}}
+{{template "foot" .}}
+{{end}}
+
+{{define "notes"}}
+{{template "head" .}}
+<h1>Memory Notes</h1>
+<form class="search" action="/notes" method="get">
+  <input type="text" name="project" value="{{.Project}}" placeholder="Project">
+  <input type="text" name="type" value="{{.NoteType}}" placeholder="Type (user, feedback, project, reference)">
+  <button type="submit">Filter</button>
+</form>
+{{if .Notes}}
+<table>
+  <thead><tr><th>ID</th><th>Project</th><th>Type</th><th>Name</th><th>Description</th><th>Updated</th></tr></thead>
+  <tbody>
+  {{range .Notes}}
+    <tr>
+      <td><a href="/note?id={{urlEscape .ID}}">{{.ID}}</a></td>
+      <td><a href="/projects/{{pathEscape .Project}}">{{.Project}}</a></td>
+      <td>{{.NoteType}}</td>
+      <td>{{.Name}}</td>
+      <td class="muted">{{if .Summary}}{{.Summary}}{{else}}{{.Description}}{{end}}</td>
+      <td>{{fmtDate .UpdatedAt}}</td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+{{else}}<p class="muted">No matching notes.</p>{{end}}
 {{template "foot" .}}
 {{end}}
 
@@ -449,8 +540,8 @@ const uiTemplates = `
 </table>
 {{else}}<p class="muted">No notes.</p>{{end}}
 
-<h2>Latest Benchmarks</h2>
 {{if .Benchmarks}}
+<h2>Latest Benchmarks</h2>
 <table>
   <thead><tr><th>Suite</th><th>Metric</th><th>Value</th><th>Delta</th><th>Status</th><th>Commit</th><th>Notes</th></tr></thead>
   <tbody>
@@ -467,7 +558,7 @@ const uiTemplates = `
   {{end}}
   </tbody>
 </table>
-{{else}}<p class="muted">No benchmarks.</p>{{end}}
+{{end}}
 {{template "foot" .}}
 {{end}}
 
