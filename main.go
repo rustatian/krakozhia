@@ -19,6 +19,7 @@ import (
 	"github.com/rustatian/krakozhia/internal/inference"
 	"github.com/rustatian/krakozhia/internal/server"
 	"github.com/rustatian/krakozhia/internal/store"
+	"github.com/rustatian/krakozhia/internal/webui"
 )
 
 func main() {
@@ -79,11 +80,25 @@ func runServe() error {
 		Timeout:     30 * time.Second,
 	})
 
-	srv := server.New(server.Config{
+	// Wire read-only HTML UI using srv.Search so browser views stay consistent with API search.
+	var srv *server.Server
+	ui := webui.New(st, func(ctx context.Context, params webui.SearchParams) ([]store.SearchHit, bool, error) {
+		res, err := srv.Search(ctx, server.SearchRequest{
+			Form:       store.FormHybrid,
+			Query:      params.Query,
+			Project:    params.Project,
+			Kind:       params.Kind,
+			Limit:      20,
+			DedupeDocs: true,
+		})
+		return res.Hits, res.Degraded, err
+	})
+	srv = server.New(server.Config{
 		Store:     st,
 		Inference: inf,
 		Token:     token,
 		Version:   "0.1.0",
+		WebUI:     ui,
 	})
 
 	workers := 1

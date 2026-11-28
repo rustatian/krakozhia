@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "krakozhia",
+            "args": ["recall"],
+            "timeout": 4
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "krakozhia",
+            "args": ["sync"],
+            "async": true
+          }
+        ]
+      }
+    ]
+  }
+}

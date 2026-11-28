@@ -47,6 +47,7 @@ type Server struct {
 	version   string
 	webUI     http.Handler
 	mcpServer *mcp.Server
+	metrics   *metricsRegistry
 }
 
 type badRequestError struct {
@@ -67,6 +68,7 @@ func New(cfg Config) *Server {
 		token:   cfg.Token,
 		version: ver,
 		webUI:   cfg.WebUI,
+		metrics: newMetricsRegistry(),
 	}
 	s.mcpServer = s.newMCPServer()
 	return s
@@ -75,33 +77,39 @@ func New(cfg Config) *Server {
 // Handler returns the configured HTTP router.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	mux.Handle("GET /healthz", s.wrapRouteFunc("GET /healthz", s.handleHealthz))
+	mux.Handle("GET /metrics", s.wrapRouteFunc("GET /metrics", s.handleMetrics))
 
 	mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
 		return s.mcpServer
 	}, &mcp.StreamableHTTPOptions{
 		Stateless: true,
 	})
-	mux.Handle("/mcp", s.requireAuth(mcpHandler))
+	mux.Handle("/mcp", s.wrapRoute("/mcp", s.requireAuth(mcpHandler)))
 
-	mux.Handle("POST /api/v1/search", s.requireAuthFunc(s.handleSearch))
-	mux.Handle("POST /api/v1/documents", s.requireAuthFunc(s.handleSaveDocument))
-	mux.Handle("GET /api/v1/documents", s.requireAuthFunc(s.handleListDocuments))
-	mux.Handle("GET /api/v1/documents/get", s.requireAuthFunc(s.handleGetDocument))
-	mux.Handle("DELETE /api/v1/documents", s.requireAuthFunc(s.handleDeleteDocument))
-	mux.Handle("GET /api/v1/notes/hashes", s.requireAuthFunc(s.handleListNoteHashes))
-	mux.Handle("POST /api/v1/notes", s.requireAuthFunc(s.handleSaveNote))
-	mux.Handle("POST /api/v1/notes/sync", s.requireAuthFunc(s.handleSyncNotes))
-	mux.Handle("GET /api/v1/notes/get", s.requireAuthFunc(s.handleGetNote))
-	mux.Handle("POST /api/v1/benchmarks", s.requireAuthFunc(s.handleRecordBenchmark))
-	mux.Handle("GET /api/v1/benchmarks", s.requireAuthFunc(s.handleQueryBenchmarks))
-	mux.Handle("GET /api/v1/benchmarks/compare", s.requireAuthFunc(s.handleCompareBenchmarks))
-	mux.Handle("GET /api/v1/briefs", s.requireAuthFunc(s.handleGetBrief))
+	mux.Handle("POST /api/v1/search", s.wrapRoute("POST /api/v1/search", s.requireAuthFunc(s.handleSearch)))
+	mux.Handle("POST /api/v1/documents", s.wrapRoute("POST /api/v1/documents", s.requireAuthFunc(s.handleSaveDocument)))
+	mux.Handle("GET /api/v1/documents", s.wrapRoute("GET /api/v1/documents", s.requireAuthFunc(s.handleListDocuments)))
+	mux.Handle("GET /api/v1/documents/get", s.wrapRoute("GET /api/v1/documents/get", s.requireAuthFunc(s.handleGetDocument)))
+	mux.Handle("DELETE /api/v1/documents", s.wrapRoute("DELETE /api/v1/documents", s.requireAuthFunc(s.handleDeleteDocument)))
+	mux.Handle("GET /api/v1/notes/hashes", s.wrapRoute("GET /api/v1/notes/hashes", s.requireAuthFunc(s.handleListNoteHashes)))
+	mux.Handle("POST /api/v1/notes", s.wrapRoute("POST /api/v1/notes", s.requireAuthFunc(s.handleSaveNote)))
+	mux.Handle("POST /api/v1/notes/sync", s.wrapRoute("POST /api/v1/notes/sync", s.requireAuthFunc(s.handleSyncNotes)))
+	mux.Handle("GET /api/v1/notes/get", s.wrapRoute("GET /api/v1/notes/get", s.requireAuthFunc(s.handleGetNote)))
+	mux.Handle("POST /api/v1/benchmarks", s.wrapRoute("POST /api/v1/benchmarks", s.requireAuthFunc(s.handleRecordBenchmark)))
+	mux.Handle("GET /api/v1/benchmarks", s.wrapRoute("GET /api/v1/benchmarks", s.requireAuthFunc(s.handleQueryBenchmarks)))
+	mux.Handle("GET /api/v1/benchmarks/compare", s.wrapRoute("GET /api/v1/benchmarks/compare", s.requireAuthFunc(s.handleCompareBenchmarks)))
+	mux.Handle("GET /api/v1/briefs", s.wrapRoute("GET /api/v1/briefs", s.requireAuthFunc(s.handleGetBrief)))
 
 	if s.webUI != nil {
-		mux.Handle("/", s.webUI)
+		mux.Handle("/", s.wrapRoute("UI", s.webUI))
 	}
 	return mux
+}
+
+// Search executes hybrid search with graceful full-text fallback for internal callers such as WebUI.
+func (s *Server) Search(ctx context.Context, req SearchRequest) (SearchResponse, error) {
+	return s.searchKnowledge(ctx, req)
 }
 
 func (s *Server) requireAuthFunc(fn http.HandlerFunc) http.Handler {
@@ -244,6 +252,9 @@ func (s *Server) searchKnowledge(ctx context.Context, req SearchRequest) (Search
 	}
 	if hits == nil {
 		hits = []store.SearchHit{}
+	}
+	if s.metrics != nil {
+		s.metrics.incSearch(req.Form, degraded)
 	}
 	return SearchResponse{
 		Hits:     hits,
