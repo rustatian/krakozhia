@@ -327,12 +327,68 @@ func TestRESTAndMCPIntegration(t *testing.T) {
 	}
 	inf.embedErr = nil
 
-	// Benchmarks REST + validation.
+	// Benchmarks REST + validation + JSON round-trip.
 	code, _ = doAuthedJSON(t, ts.URL, token, http.MethodPost, "/api/v1/benchmarks", map[string]any{
 		"project": "krakozhia",
 	})
 	if code != http.StatusBadRequest {
 		t.Fatalf("invalid benchmark = %d, want 400", code)
+	}
+
+	code, body = doAuthedJSON(t, ts.URL, token, http.MethodPost, "/api/v1/benchmarks", map[string]any{
+		"project":      "krakozhia",
+		"suite":        "recall",
+		"metric":       "p95_ms",
+		"value":        200.0,
+		"unit":         "ms",
+		"git_commit":   "abc1234",
+		"branch":       "main",
+		"environment":  "wodka",
+		"status":       "baseline",
+		"notes":        "initial run",
+		"document_id":  "krakozhia/arch",
+		"source_agent": "claude",
+	})
+	if code != http.StatusOK {
+		t.Fatalf("POST baseline benchmark = %d (%s)", code, body)
+	}
+	var baseBench store.Benchmark
+	if err := json.Unmarshal(body, &baseBench); err != nil {
+		t.Fatalf("unmarshal baseline benchmark: %v", err)
+	}
+	if baseBench.GitCommit != "abc1234" || baseBench.Branch != "main" || baseBench.Environment != "wodka" ||
+		baseBench.Status != "baseline" || baseBench.Notes != "initial run" ||
+		baseBench.DocumentID == nil || *baseBench.DocumentID != "krakozhia/arch" ||
+		baseBench.SourceAgent != "claude" {
+		t.Fatalf("baseline benchmark fields lost: %+v", baseBench)
+	}
+
+	code, body = doAuthedJSON(t, ts.URL, token, http.MethodPost, "/api/v1/benchmarks", map[string]any{
+		"project":      "krakozhia",
+		"suite":        "recall",
+		"metric":       "p95_ms",
+		"value":        150.0,
+		"unit":         "ms",
+		"baseline_id":  baseBench.ID,
+		"git_commit":   "def5678",
+		"branch":       "main",
+		"environment":  "wodka",
+		"status":       "kept",
+		"notes":        "tuned query",
+		"source_agent": "claude",
+	})
+	if code != http.StatusOK {
+		t.Fatalf("POST improved benchmark = %d (%s)", code, body)
+	}
+	var impBench store.Benchmark
+	if err := json.Unmarshal(body, &impBench); err != nil {
+		t.Fatalf("unmarshal improved benchmark: %v", err)
+	}
+	if impBench.BaselineID == nil || *impBench.BaselineID != baseBench.ID {
+		t.Fatalf("baseline_id = %v, want %d", impBench.BaselineID, baseBench.ID)
+	}
+	if impBench.DeltaPct == nil || *impBench.DeltaPct != -25.0 {
+		t.Fatalf("delta_pct = %v, want -25", impBench.DeltaPct)
 	}
 
 	// MCP Streamable HTTP client end-to-end.

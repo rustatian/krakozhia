@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/rustatian/krakozhia/internal/cli"
 	"github.com/rustatian/krakozhia/internal/enrich"
 	"github.com/rustatian/krakozhia/internal/inference"
 	"github.com/rustatian/krakozhia/internal/server"
@@ -36,14 +37,12 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: krakozhia <serve>")
+		return errors.New("usage: krakozhia <serve|recall|search|sync|save|show|list|bench|brief|eval>")
 	}
-	switch args[0] {
-	case "serve":
+	if args[0] == "serve" {
 		return runServe()
-	default:
-		return fmt.Errorf("unknown command %q: usage: krakozhia <serve>", args[0])
 	}
+	return cli.Run(args, os.Stdin, os.Stdout, os.Stderr)
 }
 
 func runServe() error {
