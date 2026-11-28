@@ -88,14 +88,21 @@ func ProjectSlug(dir string) string {
 
 // LocalPath returns the workstation file path for a note ID, or "" if the ID is unsafe.
 func LocalPath(projectsDir, project, noteID string) string {
-	if projectsDir == "" || !isSafeSegment(project) {
+	if projectsDir == "" {
 		return ""
 	}
-	stem, ok := strings.CutPrefix(noteID, project+"/")
-	if !ok || !isSafeSegment(stem) {
+	slug, stem, ok := strings.Cut(noteID, "/")
+	if !ok {
+		if !isSafeSegment(project) {
+			return ""
+		}
+		slug = project
+		stem = noteID
+	}
+	if !isSafeSegment(slug) || !isSafeSegment(stem) {
 		return ""
 	}
-	return filepath.Join(projectsDir, project, "memory", stem+".md")
+	return filepath.Join(projectsDir, slug, "memory", stem+".md")
 }
 
 func isSafeSegment(s string) bool {

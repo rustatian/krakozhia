@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rustatian/krakozhia/internal/chats"
 	"github.com/rustatian/krakozhia/internal/note"
 	"github.com/rustatian/krakozhia/internal/server"
 	"github.com/rustatian/krakozhia/internal/store"
@@ -140,6 +141,18 @@ func runSync(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	homeDir, _ := os.UserHomeDir()
+	resolvedSlugs := map[string]string{}
+	for i := range notes {
+		slug := notes[i].Project
+		if canonical, ok := resolvedSlugs[slug]; ok {
+			notes[i].Project = canonical
+			continue
+		}
+		canonical := chats.ResolveClaudeFolderProject(projectsDir, slug, homeDir)
+		resolvedSlugs[slug] = canonical
+		notes[i].Project = canonical
+	}
 	for _, w := range warnings {
 		fmt.Fprintln(stderr, "skip:", w)
 	}
@@ -252,7 +265,8 @@ func runSave(args []string, stdout io.Writer) error {
 		if err != nil {
 			return err
 		}
-		proj = note.ProjectSlug(cwd)
+		homeDir, _ := os.UserHomeDir()
+		proj = chats.ResolveProject(cwd, homeDir)
 	}
 	raw, err := os.ReadFile(fs.Arg(0))
 	if err != nil {

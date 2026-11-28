@@ -14,6 +14,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/rustatian/krakozhia/internal/chats"
 	"github.com/rustatian/krakozhia/internal/note"
 	"github.com/rustatian/krakozhia/internal/server"
 	"github.com/rustatian/krakozhia/internal/store"
@@ -123,6 +124,11 @@ func runRecall(stdin io.Reader, stdout io.Writer) error {
 	if err != nil {
 		entry.Error = err.Error()
 		return err
+	}
+	if currentProject != "" {
+		homeDir, _ := os.UserHomeDir()
+		currentProject = chats.ResolveClaudeFolderProject(projectsDir, currentProject, homeDir)
+		entry.Project = currentProject
 	}
 
 	query := truncateRunes(trimmed, maxQueryRunes)

@@ -213,6 +213,9 @@ func TestScanClaude(t *testing.T) {
 	if strings.Contains(s.RawExcerpt, "sidechain") || strings.Contains(s.RawExcerpt, "internal") || strings.Contains(s.RawExcerpt, "injected meta caveat") {
 		t.Fatalf("sidechain, meta, or thinking leaked: %s", s.RawExcerpt)
 	}
+	if got := chats.ResolveClaudeFolderProject(filepath.Join(home, ".claude", "projects"), "-home-projects-krakozhia", home); got != "krakozhia" {
+		t.Fatalf("ResolveClaudeFolderProject() = %q, want krakozhia", got)
+	}
 }
 
 func TestScanAntigravity(t *testing.T) {

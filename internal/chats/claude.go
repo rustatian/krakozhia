@@ -58,6 +58,58 @@ func ScanClaude(claudeProjectsDir, homeDir string, opts ScanOptions) ([]Session,
 	return out, nil
 }
 
+// ResolveClaudeFolderProject maps a Claude Code projects/<slug> folder name to its canonical project name.
+func ResolveClaudeFolderProject(claudeProjectsDir, slug, homeDir string) string {
+	slug = strings.TrimSpace(slug)
+	if slug == "" {
+		return ""
+	}
+	if !strings.HasPrefix(slug, "-") {
+		return slug
+	}
+	if claudeProjectsDir != "" {
+		paths, err := filepath.Glob(filepath.Join(claudeProjectsDir, slug, "*.jsonl"))
+		if err == nil {
+			for _, p := range paths {
+				if cwd := firstClaudeCwd(p); cwd != "" {
+					return ResolveProject(cwd, homeDir)
+				}
+			}
+		}
+	}
+	if homeDir != "" {
+		homeSlug := strings.NewReplacer("/", "-", ".", "-").Replace(filepath.Clean(homeDir))
+		if slug == homeSlug {
+			return "home"
+		}
+	}
+	return slug
+}
+
+func firstClaudeCwd(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	r := bufio.NewReaderSize(f, 32*1024)
+	for i := 0; i < 64; i++ {
+		line, err := r.ReadBytes('\n')
+		if len(line) > 0 {
+			var cl struct {
+				Cwd string `json:"cwd"`
+			}
+			if json.Unmarshal(line, &cl) == nil && strings.TrimSpace(cl.Cwd) != "" {
+				return strings.TrimSpace(cl.Cwd)
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+	return ""
+}
+
 func parseClaudeFile(path string, mtime time.Time, homeDir string) (Session, bool) {
 	f, err := os.Open(path)
 	if err != nil {
