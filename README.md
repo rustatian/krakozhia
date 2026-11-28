@@ -27,7 +27,7 @@ Create `~/.config/krakozhia/config.json` with mode `0600`:
   "url": "https://kb.lab.rustatian.me",
   "token": "<bearer-token>",
   "max_distance": 0.42,
-  "min_text_score": 1.50,
+  "min_text_score": 0.75,
   "max_pointers": 3,
   "source_agent": "claude"
 }

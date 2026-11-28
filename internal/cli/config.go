@@ -16,7 +16,7 @@ import (
 const (
 	DefaultURL          = "https://kb.lab.rustatian.me"
 	DefaultMaxDistance  = 0.42
-	DefaultMinTextScore = 1.50
+	DefaultMinTextScore = 0.75
 	DefaultMaxPointers  = 3
 	DefaultSourceAgent  = "claude"
 )
