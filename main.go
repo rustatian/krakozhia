@@ -38,7 +38,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: krakozhia <serve|recall|search|sync|save|show|list|bench|brief|eval>")
+		return errors.New("usage: krakozhia <serve|recall|search|sync|sync-chats|save|show|list|bench|brief|eval>")
 	}
 	if args[0] == "serve" {
 		return runServe()

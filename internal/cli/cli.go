@@ -30,7 +30,7 @@ type localManifest struct {
 // Run dispatches a CLI command and never exits with code 2.
 func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: krakozhia <serve|recall|search|sync|save|show|list|bench|brief|eval>")
+		return errors.New("usage: krakozhia <serve|recall|search|sync|sync-chats|save|show|list|bench|brief|eval>")
 	}
 	switch args[0] {
 	case "recall":
@@ -39,6 +39,8 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return runSearch(args[1:], stdout)
 	case "sync":
 		return runSync(args[1:], stdout, stderr)
+	case "sync-chats":
+		return runSyncChats(args[1:], stdout, stderr)
 	case "save":
 		return runSave(args[1:], stdout)
 	case "show":

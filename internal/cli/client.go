@@ -154,6 +154,25 @@ func (c *Client) SyncNotes(ctx context.Context, req server.SyncNotesRequest) (se
 	return out, err
 }
 
+// ListChatHashes calls GET /api/v1/chats/hashes.
+func (c *Client) ListChatHashes(ctx context.Context) (map[string]string, error) {
+	var out struct {
+		Hashes map[string]string `json:"hashes"`
+	}
+	err := c.doJSON(ctx, http.MethodGet, "/api/v1/chats/hashes", nil, &out)
+	if out.Hashes == nil {
+		out.Hashes = map[string]string{}
+	}
+	return out.Hashes, err
+}
+
+// IngestChats calls POST /api/v1/chats/ingest.
+func (c *Client) IngestChats(ctx context.Context, req server.IngestChatsRequest) (server.IngestChatsResponse, error) {
+	var out server.IngestChatsResponse
+	err := c.doJSON(ctx, http.MethodPost, "/api/v1/chats/ingest", req, &out)
+	return out, err
+}
+
 // RecordBenchmark calls POST /api/v1/benchmarks.
 func (c *Client) RecordBenchmark(ctx context.Context, in store.RecordBenchmarkInput) (store.Benchmark, error) {
 	var out store.Benchmark

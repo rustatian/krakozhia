@@ -18,6 +18,8 @@ import (
 
 type fakeServerState struct {
 	hashes         map[string]string
+	chatHashes     map[string]string
+	ingestedChats  []server.IngestChatsRequest
 	syncedBatches  []server.SyncNotesRequest
 	searchRequests []server.SearchRequest
 	searchResponse server.SearchResponse
@@ -59,6 +61,18 @@ func newTestAPIServer(t *testing.T, token string, st *fakeServerState) *httptest
 			_ = json.NewEncoder(w).Encode(server.SyncNotesResponse{
 				Written: len(req.Notes),
 				Deleted: len(req.DeleteIDs),
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/chats/hashes":
+			_ = json.NewEncoder(w).Encode(map[string]any{"hashes": st.chatHashes})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/chats/ingest":
+			var req server.IngestChatsRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			st.ingestedChats = append(st.ingestedChats, req)
+			_ = json.NewEncoder(w).Encode(server.IngestChatsResponse{
+				Queued: len(req.Chats),
 			})
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/documents":
 			var req server.SaveDocumentRequest
@@ -533,5 +547,40 @@ func TestSaveShowListBenchBriefAndEval(t *testing.T) {
 		if !strings.Contains(out.String(), form) {
 			t.Fatalf("eval output missing %q:\n%s", form, out.String())
 		}
+	}
+}
+
+func TestSyncChatsCommand(t *testing.T) {
+	st := &fakeServerState{
+		chatHashes: map[string]string{},
+	}
+	srv := newTestAPIServer(t, "secret-tok", st)
+	defer srv.Close()
+
+	_, _, projectsDir := setupTestEnv(t, srv.URL, "secret-tok")
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	t.Setenv("KRAKOZHIA_PROJECTS_DIR", projectsDir)
+	repo := filepath.Join(fakeHome, "projects", "krakozhia")
+	_ = os.MkdirAll(filepath.Join(repo, ".git"), 0o755)
+	projDir := filepath.Join(projectsDir, "-krakozhia")
+	_ = os.MkdirAll(projDir, 0o755)
+
+	chatFile := filepath.Join(projDir, "chat-99.jsonl")
+	raw := `{"type":"user","sessionId":"chat-99","cwd":"` + repo + `","timestamp":"2026-11-27T10:00:00Z","message":{"role":"user","content":"Implement automatic chat transcript ingestion for all four clients."}}` + "\n" +
+		`{"type":"assistant","sessionId":"chat-99","cwd":"` + repo + `","timestamp":"2026-11-27T10:01:00Z","message":{"role":"assistant","content":[{"type":"text","text":"Added PostgreSQL chat_sessions and async GPU distillation worker."}]}}` + "\n"
+	_ = os.WriteFile(chatFile, []byte(raw), 0o600)
+	oldTime := time.Now().Add(-15 * time.Minute)
+	_ = os.Chtimes(chatFile, oldTime, oldTime)
+
+	var out, errBuf bytes.Buffer
+	if err := cli.Run([]string{"sync-chats", "--agent", "claude", "--all"}, nil, &out, &errBuf); err != nil {
+		t.Fatalf("sync-chats err = %v (stderr=%s)", err, errBuf.String())
+	}
+	if len(st.ingestedChats) != 1 || len(st.ingestedChats[0].Chats) != 1 {
+		t.Fatalf("expected 1 ingested chat, got %+v", st.ingestedChats)
+	}
+	if st.ingestedChats[0].Chats[0].Project != "krakozhia" {
+		t.Fatalf("project = %q, want krakozhia", st.ingestedChats[0].Chats[0].Project)
 	}
 }
