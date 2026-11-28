@@ -5,7 +5,7 @@
 
 Self-hosted knowledge base for coding agents, backed by PostgreSQL (`pgvector`) and local GPU inference (`llama-server`).
 
-`krakozhia` stores versioned Markdown documents, Claude Code memory notes, distilled chat sessions, GitHub issues and roadmaps, project briefs, and structured benchmarks. Hybrid retrieval combines exact cosine similarity and bilingual (`english` + `simple`) full-text search with reciprocal rank fusion (`k=60`), recency decay, and supersede penalties.
+`krakozhia` stores versioned Markdown documents, Claude Code memory notes, distilled chat sessions (with original timestamps preserved), GitHub issues and roadmaps, project briefs, and structured benchmarks. Hybrid retrieval combines exact cosine similarity and bilingual (`english` + `simple`) full-text search with reciprocal rank fusion (`k=60`), whole-day recency decay, and supersede penalties. Background GPU workers run on `llama-server` (`qwen3-embedding-0.6b`, `gemma-4-12b-it` with JSON grammar enforcement, and `bge-reranker-v2-m3`) and expose live queue status at `/jobs`.
 
 ```mermaid
 flowchart LR
@@ -28,7 +28,16 @@ flowchart LR
 
 ## Quick Start
 
-For server deployment on Kubernetes (including GPU `llama-server`), see [deploy/k8s/README.md](deploy/k8s/README.md).
+### Server (Kubernetes)
+
+See [deploy/k8s/README.md](deploy/k8s/README.md) for prerequisites, Secret setup, and Gateway API routing:
+
+```sh
+kubectl apply -k deploy/k8s/inference
+kubectl apply -k deploy/k8s/krakozhia
+```
+
+### CLI and Hooks
 
 Install the CLI binary into `~/.local/bin`:
 
@@ -40,7 +49,7 @@ Create `~/.config/krakozhia/config.json` with mode `0600` (or set `KRAKOZHIA_API
 
 ```json
 {
-  "url": "https://kb.lab.rustatian.me",
+  "url": "https://kb.example.com",
   "token": "<bearer-token>",
   "max_distance": 0.42,
   "min_text_score": 0.75,
@@ -97,7 +106,7 @@ Install the Claude Code plugin from this repository to enable automatic `recall`
 <summary><strong>Claude Code</strong></summary>
 
 ```sh
-claude mcp add --transport http --scope user krakozhia https://kb.lab.rustatian.me/mcp \
+claude mcp add --transport http --scope user krakozhia https://kb.example.com/mcp \
   --header "Authorization: Bearer ${KRAKOZHIA_API_TOKEN}"
 ```
 
@@ -110,7 +119,7 @@ claude mcp add --transport http --scope user krakozhia https://kb.lab.rustatian.
 {
   "mcpServers": {
     "krakozhia": {
-      "serverUrl": "https://kb.lab.rustatian.me/mcp",
+      "serverUrl": "https://kb.example.com/mcp",
       "headers": {
         "Authorization": "Bearer ${KRAKOZHIA_API_TOKEN}"
       }
@@ -126,7 +135,7 @@ claude mcp add --transport http --scope user krakozhia https://kb.lab.rustatian.
 
 ```toml
 [mcp_servers.krakozhia]
-url = "https://kb.lab.rustatian.me/mcp"
+url = "https://kb.example.com/mcp"
 bearer_token_env_var = "KRAKOZHIA_API_TOKEN"
 ```
 
@@ -140,7 +149,7 @@ bearer_token_env_var = "KRAKOZHIA_API_TOKEN"
   "mcp": {
     "krakozhia": {
       "type": "remote",
-      "url": "https://kb.lab.rustatian.me/mcp",
+      "url": "https://kb.example.com/mcp",
       "headers": {
         "Authorization": "Bearer {env:KRAKOZHIA_API_TOKEN}"
       }
