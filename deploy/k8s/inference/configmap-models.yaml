@@ -1,0 +1,45 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llama-models-preset
+  namespace: inference
+  labels:
+    app.kubernetes.io/name: llama-server
+    app.kubernetes.io/part-of: krakozhia
+data:
+  models.ini: |
+    version = 1
+
+    [*]
+    n-gpu-layers = all
+    cache-ram = 256
+    load-mode = none
+
+    [qwen3-embedding-0.6b]
+    model = /models/Qwen3-Embedding-0.6B-Q8_0.gguf
+    embedding = true
+    pooling = last
+    ctx-size = 8192
+    batch-size = 2048
+    ubatch-size = 2048
+    load-on-startup = true
+
+    [gemma-4-12b-it]
+    model = /models/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf
+    ctx-size = 16384
+    cache-type-k = q8_0
+    cache-type-v = q8_0
+    flash-attn = on
+    jinja = true
+    reasoning = off
+    load-on-startup = true
+
+    [bge-reranker-v2-m3]
+    model = /models/bge-reranker-v2-m3-Q8_0.gguf
+    embedding = true
+    pooling = rank
+    reranking = true
+    ctx-size = 2048
+    batch-size = 2048
+    ubatch-size = 2048
+    load-on-startup = true

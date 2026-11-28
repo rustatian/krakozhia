@@ -28,6 +28,8 @@ flowchart LR
 
 ## Quick Start
 
+For server deployment on Kubernetes (including GPU `llama-server`), see [deploy/k8s/README.md](deploy/k8s/README.md).
+
 Install the CLI binary into `~/.local/bin`:
 
 ```sh

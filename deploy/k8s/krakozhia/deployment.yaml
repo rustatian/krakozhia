@@ -1,0 +1,90 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: krakozhia
+  namespace: krakozhia
+  labels:
+    app.kubernetes.io/name: krakozhia
+    app.kubernetes.io/part-of: krakozhia
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: krakozhia
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: krakozhia
+        app.kubernetes.io/part-of: krakozhia
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: krakozhia
+          # Pin to an immutable sha-<short-commit> tag in production.
+          image: ghcr.io/rustatian/krakozhia:latest
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: KRAKOZHIA_LISTEN
+              value: ":8080"
+            - name: KRAKOZHIA_INFERENCE_URL
+              value: http://llama-server.inference.svc.cluster.local:8080
+            - name: KRAKOZHIA_INFERENCE_TIMEOUT
+              value: "180s"
+            - name: KRAKOZHIA_EMBED_MODEL
+              value: qwen3-embedding-0.6b
+            - name: KRAKOZHIA_CHAT_MODEL
+              value: gemma-4-12b-it
+            - name: KRAKOZHIA_RERANK_MODEL
+              value: bge-reranker-v2-m3
+            - name: KRAKOZHIA_ENRICH_WORKERS
+              value: "1"
+            # Optional: whole GitHub orgs (synthesizes org and project roadmaps).
+            # - name: KRAKOZHIA_GITHUB_OWNERS
+            #   value: "your-org-1,your-org-2"
+            # Optional: standalone owner/repo entries (synthesizes project roadmaps only).
+            # - name: KRAKOZHIA_GITHUB_REPOS
+            #   value: "your-user/repo-1,your-user/repo-2"
+            - name: KRAKOZHIA_GITHUB_SYNC_INTERVAL
+              value: "2h"
+            - name: KRAKOZHIA_GITHUB_CLOSED_LOOKBACK_DAYS
+              value: "90"
+          envFrom:
+            - secretRef:
+                name: krakozhia-config
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
