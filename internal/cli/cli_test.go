@@ -178,8 +178,8 @@ func TestConfigValidation(t *testing.T) {
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("LoadConfig error = %v, wantErr %v", err, tc.wantErr)
 			}
-			if !tc.wantErr && cfg.URL != cli.DefaultURL {
-				t.Fatalf("URL = %q, want %q", cfg.URL, cli.DefaultURL)
+			if !tc.wantErr && (cfg.URL != cli.DefaultURL || cfg.MaxDistance != cli.DefaultMaxDistance || cfg.MinTextScore != cli.DefaultMinTextScore) {
+				t.Fatalf("defaults mismatch: %+v", cfg)
 			}
 		})
 	}

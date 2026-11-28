@@ -15,8 +15,8 @@ import (
 // Default configuration values for krakozhia CLI clients.
 const (
 	DefaultURL          = "https://kb.lab.rustatian.me"
-	DefaultMaxDistance  = 0.45
-	DefaultMinTextScore = 0.10
+	DefaultMaxDistance  = 0.42
+	DefaultMinTextScore = 1.50
 	DefaultMaxPointers  = 3
 	DefaultSourceAgent  = "claude"
 )
