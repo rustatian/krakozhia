@@ -130,6 +130,9 @@ func (m *mockInference) Chat(_ context.Context, sys, user string, _ int) (string
 	if strings.Contains(sys, "project brief") {
 		return "# krakozhia\n\nUses PostgreSQL with pgvector 0.8.7. Latest p95 recall: 42.5 ms.", nil
 	}
+	if strings.Contains(sys, "conversation") {
+		return `{"title":"Chat History Design","summary":"Decided to distill transcripts asynchronously on RX 9070 XT.","tags":["chat","gpu","postgres"],"markdown":"## Context and Goal\nStore cross-model chat history.\n\n## Decisions Made\nDistill transcripts into versioned chat documents.\n\n## Changes and Outcomes\nAdded chat_sessions table.\n\n## Open Questions\nNone."}`, nil
+	}
 	if strings.Contains(user, "Existing documents") {
 		return `{"summary":"Vector storage architecture.","tags":["PostgreSQL","pgvector"],"possible_supersedes":[{"id":"krakozhia/old-spec","reason":"replaces old spec"}]}`, nil
 	}
@@ -295,6 +298,91 @@ func TestWorkerIntegrationAndIdempotency(t *testing.T) {
 	}
 	if inf.chatCalls != chatsBefore {
 		t.Fatalf("expected 0 chat calls when source_hash matches, got %d", inf.chatCalls-chatsBefore)
+	}
+
+	// Verify distill_chat creates a doc_type=chat document with summary/tags, clears raw_excerpt, and updates brief.
+	queued, err := st.UpsertChatSession(ctx, store.IngestChatInput{
+		SourceAgent: "antigravity",
+		ExternalID:  "97826401-98c5-47d1-911c-e5ce4b7fa8d6",
+		Project:     "krakozhia",
+		Title:       "Chat History Session",
+		RawExcerpt:  "User: Store all chat histories.\nAssistant: We will distill them into versioned chat documents.",
+	})
+	if err != nil || !queued {
+		t.Fatalf("UpsertChatSession = %v, %v", queued, err)
+	}
+	for i := 0; i < 10; i++ {
+		w2, err := w.ProcessOnce(ctx)
+		if err != nil {
+			t.Fatalf("ProcessOnce distill step %d: %v", i, err)
+		}
+		if !w2 {
+			break
+		}
+	}
+	chatSession, err := st.GetChatSession(ctx, "antigravity:97826401-98c5-47d1-911c-e5ce4b7fa8d6")
+	if err != nil || chatSession.RawExcerpt != "" || chatSession.DocumentID == nil {
+		t.Fatalf("distilled chat session = %+v, err=%v", chatSession, err)
+	}
+	chatDoc, err := st.GetDocument(ctx, *chatSession.DocumentID, 0)
+	if err != nil || chatDoc.DocType != "chat" || chatDoc.Summary == "" || len(chatDoc.Tags) == 0 {
+		t.Fatalf("distilled chat doc = %+v, err=%v", chatDoc, err)
+	}
+}
+
+func TestParseChatDistill(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name      string
+		raw       string
+		fallback  string
+		wantTitle string
+		wantSum   string
+		wantTags  []string
+		wantErr   bool
+	}{
+		{
+			name:      "parses structured json response",
+			raw:       `{"title":"GPU Setup","summary":"Passed RX 9070 XT through to wodka-3.","tags":["GPU","Talos"],"markdown":"## Decisions Made\nUse VFIO."}`,
+			fallback:  "Fallback",
+			wantTitle: "GPU Setup",
+			wantSum:   "Passed RX 9070 XT through to wodka-3.",
+			wantTags:  []string{"gpu", "talos"},
+		},
+		{
+			name:      "falls back to raw markdown when model skips json",
+			raw:       "# Plain Markdown Title\n\n## Decisions Made\nKept simple config.\n",
+			fallback:  "Fallback",
+			wantTitle: "Plain Markdown Title",
+			wantSum:   "Plain Markdown Title",
+			wantTags:  []string{"chat"},
+		},
+		{
+			name:     "empty response fails",
+			raw:      "   ",
+			fallback: "Fallback",
+			wantErr:  true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := enrich.ParseChatDistill(tc.raw, tc.fallback)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got %+v", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseChatDistill() err = %v", err)
+			}
+			if got.Title != tc.wantTitle || got.Summary != tc.wantSum || !slices.Equal(got.Tags, tc.wantTags) || got.Markdown == "" {
+				t.Fatalf("ParseChatDistill() = %+v, want title=%q sum=%q tags=%v", got, tc.wantTitle, tc.wantSum, tc.wantTags)
+			}
+		})
 	}
 }
 

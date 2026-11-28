@@ -96,6 +96,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/notes", s.wrapRoute("POST /api/v1/notes", s.requireAuthFunc(s.handleSaveNote)))
 	mux.Handle("POST /api/v1/notes/sync", s.wrapRoute("POST /api/v1/notes/sync", s.requireAuthFunc(s.handleSyncNotes)))
 	mux.Handle("GET /api/v1/notes/get", s.wrapRoute("GET /api/v1/notes/get", s.requireAuthFunc(s.handleGetNote)))
+	mux.Handle("GET /api/v1/chats/hashes", s.wrapRoute("GET /api/v1/chats/hashes", s.requireAuthFunc(s.handleListChatHashes)))
+	mux.Handle("POST /api/v1/chats/ingest", s.wrapRoute("POST /api/v1/chats/ingest", s.requireAuthFunc(s.handleIngestChats)))
 	mux.Handle("POST /api/v1/benchmarks", s.wrapRoute("POST /api/v1/benchmarks", s.requireAuthFunc(s.handleRecordBenchmark)))
 	mux.Handle("GET /api/v1/benchmarks", s.wrapRoute("GET /api/v1/benchmarks", s.requireAuthFunc(s.handleQueryBenchmarks)))
 	mux.Handle("GET /api/v1/benchmarks/compare", s.wrapRoute("GET /api/v1/benchmarks/compare", s.requireAuthFunc(s.handleCompareBenchmarks)))
@@ -526,6 +528,53 @@ func (s *Server) handleGetNote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, n)
+}
+
+// IngestChatsRequest submits a batch of redacted chat excerpts for async distillation.
+type IngestChatsRequest struct {
+	Chats []store.IngestChatInput `json:"chats"`
+}
+
+// IngestChatsResponse reports batch chat ingestion counts.
+type IngestChatsResponse struct {
+	Queued    int      `json:"queued"`
+	Unchanged int      `json:"unchanged"`
+	Errors    []string `json:"errors,omitempty"`
+}
+
+func (s *Server) handleListChatHashes(w http.ResponseWriter, r *http.Request) {
+	hashes, err := s.store.ListChatHashes(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"hashes": hashes})
+}
+
+func (s *Server) handleIngestChats(w http.ResponseWriter, r *http.Request) {
+	var req IngestChatsRequest
+	if err := decodeJSON(r.Body, &req); err != nil {
+		writeError(w, err)
+		return
+	}
+	var res IngestChatsResponse
+	for _, ch := range req.Chats {
+		queued, err := s.store.UpsertChatSession(r.Context(), ch)
+		if err != nil {
+			label := ch.ID
+			if label == "" {
+				label = ch.SourceAgent + ":" + ch.ExternalID
+			}
+			res.Errors = append(res.Errors, fmt.Sprintf("%s: %v", label, err))
+			continue
+		}
+		if queued {
+			res.Queued++
+		} else {
+			res.Unchanged++
+		}
+	}
+	writeJSON(w, http.StatusOK, res)
 }
 
 func (s *Server) handleRecordBenchmark(w http.ResponseWriter, r *http.Request) {

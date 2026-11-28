@@ -305,6 +305,26 @@ func TestRESTAndMCPIntegration(t *testing.T) {
 		t.Fatalf("GET /api/v1/notes/hashes = %d (%s)", code, body)
 	}
 
+	// Chat session ingest and hashes.
+	code, body = doAuthedJSON(t, ts.URL, token, http.MethodPost, "/api/v1/chats/ingest", map[string]any{
+		"chats": []map[string]any{
+			{
+				"source_agent": "claude",
+				"external_id":  "sess-42",
+				"project":      "krakozhia",
+				"title":        "Architecture discussion",
+				"raw_excerpt":  "User: Design chat sync.\nAssistant: Use async GPU distillation.",
+			},
+		},
+	})
+	if code != http.StatusOK || !strings.Contains(string(body), `"queued":1`) {
+		t.Fatalf("POST /api/v1/chats/ingest = %d (%s)", code, body)
+	}
+	code, body = doAuthedJSON(t, ts.URL, token, http.MethodGet, "/api/v1/chats/hashes", nil)
+	if code != http.StatusOK || !strings.Contains(string(body), "claude:sess-42") {
+		t.Fatalf("GET /api/v1/chats/hashes = %d (%s)", code, body)
+	}
+
 	// Search hybrid + graceful fallback when inference fails.
 	code, body = doAuthedJSON(t, ts.URL, token, http.MethodPost, "/api/v1/search", map[string]any{
 		"form":        "hybrid",

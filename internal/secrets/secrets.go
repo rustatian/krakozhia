@@ -40,6 +40,8 @@ var rules = []rule{
 	{name: "bearer-token", pattern: regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/-]{24,}=*\b`)},
 }
 
+var pemBlockPattern = regexp.MustCompile(`(?s)-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----.*?-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----`)
+
 // Scan inspects text line by line and returns any matched secret patterns.
 func Scan(text string) []Finding {
 	var findings []Finding
@@ -53,4 +55,21 @@ func Scan(text string) []Finding {
 		}
 	}
 	return findings
+}
+
+// Redact replaces matched secret blocks and tokens with placeholders and returns the replacement count.
+func Redact(text string) (string, int) {
+	total := 0
+	out := pemBlockPattern.ReplaceAllStringFunc(text, func(string) string {
+		total++
+		return "[REDACTED:private-key]"
+	})
+	for _, r := range rules {
+		placeholder := "[REDACTED:" + r.name + "]"
+		out = r.pattern.ReplaceAllStringFunc(out, func(string) string {
+			total++
+			return placeholder
+		})
+	}
+	return out, total
 }

@@ -28,13 +28,16 @@ type ChunkInput struct {
 
 // SaveDocumentInput specifies a document save request.
 type SaveDocumentInput struct {
-	Project     string
-	Name        string
-	DocType     string
-	Title       string
-	Content     string
-	SourceAgent string
-	Chunks      []ChunkInput
+	Project       string
+	Name          string
+	DocType       string
+	Title         string
+	Summary       string
+	Tags          []string
+	Content       string
+	SourceAgent   string
+	SkipEnrichDoc bool
+	Chunks        []ChunkInput
 }
 
 // SaveDocumentResult summarizes a saved document revision.
@@ -256,21 +259,31 @@ func (s *Store) SaveDocument(ctx context.Context, in SaveDocumentInput) (SaveDoc
 		return SaveDocumentResult{ID: id, Revision: curRev, ChunkCount: curChunks, Unchanged: true}, nil
 	}
 
+	tags := in.Tags
+	if tags == nil {
+		tags = []string{}
+	}
 	nextRev := curRev + 1
 	if errors.Is(err, pgx.ErrNoRows) {
 		nextRev = 1
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO documents (id, project, name, doc_type, title, current_revision, source_agent)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-			id, in.Project, in.Name, in.DocType, title, nextRev, in.SourceAgent); err != nil {
+			INSERT INTO documents (id, project, name, doc_type, title, summary, tags, current_revision, source_agent)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+			id, in.Project, in.Name, in.DocType, title, in.Summary, tags, nextRev, in.SourceAgent); err != nil {
 			return SaveDocumentResult{}, err
 		}
 	} else {
 		if _, err := tx.Exec(ctx, `
 			UPDATE documents
-			SET doc_type = $2, title = $3, current_revision = $4, source_agent = $5, updated_at = NOW()
+			SET doc_type = $2,
+			    title = $3,
+			    summary = CASE WHEN $4 <> '' THEN $4 ELSE summary END,
+			    tags = CASE WHEN cardinality($5::text[]) > 0 THEN $5 ELSE tags END,
+			    current_revision = $6,
+			    source_agent = $7,
+			    updated_at = NOW()
 			WHERE id = $1`,
-			id, in.DocType, title, nextRev, in.SourceAgent); err != nil {
+			id, in.DocType, title, in.Summary, tags, nextRev, in.SourceAgent); err != nil {
 			return SaveDocumentResult{}, err
 		}
 	}
@@ -295,8 +308,10 @@ func (s *Store) SaveDocument(ctx context.Context, in SaveDocumentInput) (SaveDoc
 		}
 	}
 
-	if err := enqueueJobTx(ctx, tx, "enrich_doc", "doc", id); err != nil {
-		return SaveDocumentResult{}, err
+	if !in.SkipEnrichDoc {
+		if err := enqueueJobTx(ctx, tx, "enrich_doc", "doc", id); err != nil {
+			return SaveDocumentResult{}, err
+		}
 	}
 	if err := enqueueJobTx(ctx, tx, "refresh_brief", "project", in.Project); err != nil {
 		return SaveDocumentResult{}, err

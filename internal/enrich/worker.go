@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rustatian/krakozhia/internal/chunk"
+	"github.com/rustatian/krakozhia/internal/secrets"
 	"github.com/rustatian/krakozhia/internal/store"
 )
 
@@ -57,6 +59,14 @@ type SupersedeHint struct {
 type NoteMeta struct {
 	Summary string   `json:"summary"`
 	Tags    []string `json:"tags"`
+}
+
+// ChatDistill holds a distilled chat session summary ready to store as a document.
+type ChatDistill struct {
+	Title    string   `json:"title"`
+	Summary  string   `json:"summary"`
+	Tags     []string `json:"tags"`
+	Markdown string   `json:"markdown"`
 }
 
 // New returns a configured enrichment Worker.
@@ -118,6 +128,8 @@ func (w *Worker) ProcessOnce(ctx context.Context) (bool, error) {
 		runErr = w.enrichDoc(ctx, job.TargetID)
 	case "enrich_note":
 		runErr = w.enrichNote(ctx, job.TargetID)
+	case "distill_chat":
+		runErr = w.distillChat(ctx, job.TargetID)
 	case "refresh_brief":
 		runErr = w.refreshBrief(ctx, job.TargetID)
 	default:
@@ -226,12 +238,72 @@ func (w *Worker) enrichNote(ctx context.Context, noteID string) error {
 	return w.store.UpdateNoteEmbedding(ctx, n.ID, vec)
 }
 
-func (w *Worker) refreshBrief(ctx context.Context, project string) error {
-	docs, err := w.store.ListDocuments(ctx, project, "", 15)
+func (w *Worker) distillChat(ctx context.Context, chatID string) error {
+	cs, err := w.store.GetChatSession(ctx, chatID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
-	notes, err := w.store.ListNotes(ctx, project, "", 20)
+	if cs.DistilledHash == cs.TranscriptHash || strings.TrimSpace(cs.RawExcerpt) == "" {
+		return nil
+	}
+
+	raw, err := w.inf.Chat(ctx, chatDistillSystemPrompt, buildChatDistillPrompt(cs), 1024)
+	if err != nil {
+		return err
+	}
+	distilled, err := ParseChatDistill(raw, cs.Title)
+	if err != nil {
+		return err
+	}
+
+	var docBody strings.Builder
+	fmt.Fprintf(&docBody, "# %s\n\n", distilled.Title)
+	fmt.Fprintf(&docBody, "- Agent: `%s`\n- Date: `%s`\n- Session: `%s`\n", cs.SourceAgent, cs.UpdatedAt.UTC().Format(time.DateOnly), cs.ExternalID)
+	if cs.WorkspacePath != "" {
+		fmt.Fprintf(&docBody, "- Workspace: `%s`\n", cs.WorkspacePath)
+	}
+	docBody.WriteString("\n")
+	docBody.WriteString(strings.TrimSpace(distilled.Markdown))
+	docBody.WriteString("\n")
+
+	content, _ := secrets.Redact(docBody.String())
+	sections := chunk.Split(content, distilled.Title)
+	chunkInputs := make([]store.ChunkInput, len(sections))
+	for i, sec := range sections {
+		chunkInputs[i] = store.ChunkInput{Section: sec}
+		if vec, err := w.inf.EmbedDocument(ctx, sec.EmbedText()); err == nil {
+			chunkInputs[i].Embedding = vec
+		}
+	}
+
+	docName := chatDocumentName(cs.SourceAgent, cs.ExternalID)
+	saved, err := w.store.SaveDocument(ctx, store.SaveDocumentInput{
+		Project:       cs.Project,
+		Name:          docName,
+		DocType:       "chat",
+		Title:         distilled.Title,
+		Summary:       distilled.Summary,
+		Tags:          distilled.Tags,
+		Content:       content,
+		SourceAgent:   cs.SourceAgent,
+		SkipEnrichDoc: true,
+		Chunks:        chunkInputs,
+	})
+	if err != nil {
+		return err
+	}
+	return w.store.MarkChatDistilled(ctx, cs.ID, saved.ID, cs.TranscriptHash)
+}
+
+func (w *Worker) refreshBrief(ctx context.Context, project string) error {
+	docs, err := w.store.ListDocuments(ctx, project, "", 25)
+	if err != nil {
+		return err
+	}
+	notes, err := w.store.ListNotesForBrief(ctx, project, 20)
 	if err != nil {
 		return err
 	}
@@ -305,6 +377,92 @@ func ParseNoteMeta(raw string) (NoteMeta, error) {
 	}
 	meta.Tags = normalizeTags(meta.Tags)
 	return meta, nil
+}
+
+// ParseChatDistill parses structured JSON chat distillation output or falls back to plain Markdown.
+func ParseChatDistill(raw, fallbackTitle string) (ChatDistill, error) {
+	cleaned := stripJSONFence(raw)
+	if cleaned == "" {
+		return ChatDistill{}, errors.New("empty chat distillation response")
+	}
+	var d ChatDistill
+	if err := json.Unmarshal([]byte(cleaned), &d); err == nil && strings.TrimSpace(d.Markdown) != "" {
+		d.Title = strings.TrimSpace(d.Title)
+		if d.Title == "" {
+			d.Title = strings.TrimSpace(fallbackTitle)
+		}
+		if d.Title == "" {
+			d.Title = "Session Summary"
+		}
+		d.Summary = strings.TrimSpace(d.Summary)
+		if d.Summary == "" {
+			d.Summary = d.Title
+		}
+		d.Tags = normalizeTags(d.Tags)
+		if len(d.Tags) == 0 {
+			d.Tags = []string{"chat"}
+		}
+		d.Markdown = strings.TrimSpace(d.Markdown)
+		return d, nil
+	}
+
+	// Accept raw Markdown when the model skips the JSON wrapper.
+	md := stripMarkdownFence(raw)
+	if md == "" {
+		return ChatDistill{}, errors.New("empty chat distillation response")
+	}
+	title := chunk.Title(md)
+	if title == "" {
+		title = strings.TrimSpace(fallbackTitle)
+	}
+	if title == "" {
+		title = "Session Summary"
+	}
+	return ChatDistill{
+		Title:    title,
+		Summary:  title,
+		Tags:     []string{"chat"},
+		Markdown: md,
+	}, nil
+}
+
+func stripMarkdownFence(raw string) string {
+	s := strings.TrimSpace(raw)
+	if rest, ok := strings.CutPrefix(s, "```markdown"); ok {
+		s = rest
+	} else if rest, ok := strings.CutPrefix(s, "```md"); ok {
+		s = rest
+	} else if rest, ok := strings.CutPrefix(s, "```"); ok {
+		s = rest
+	}
+	s = strings.TrimSuffix(s, "```")
+	return strings.TrimSpace(s)
+}
+
+func chatDocumentName(agent, externalID string) string {
+	clean := func(s string, max int) string {
+		var b strings.Builder
+		for _, r := range strings.ToLower(s) {
+			if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+				b.WriteRune(r)
+			} else if r == '_' || r == '.' || r == ':' || r == '/' {
+				b.WriteByte('-')
+			}
+			if b.Len() >= max {
+				break
+			}
+		}
+		return strings.Trim(b.String(), "-")
+	}
+	a := clean(agent, 12)
+	if a == "" {
+		a = "agent"
+	}
+	id := clean(externalID, 32)
+	if id == "" {
+		id = "session"
+	}
+	return "chat-" + a + "-" + id
 }
 
 // Backoff returns exponential retry delay starting at 30s and capped at 15m.

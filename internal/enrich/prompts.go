@@ -24,10 +24,28 @@ Return one JSON object with keys:
 - "tags": up to 8 lowercase hyphenated tags.
 Output raw JSON only with no extra commentary.`
 
-	briefSystemPrompt = `You maintain a compact project brief in Markdown for AI coding assistants.
-Summarize the current architecture, active decisions, latest benchmark baselines (preserve exact numbers and units), and open caveats from the provided documents, notes, and benchmarks.
+	chatDistillSystemPrompt = `You distill a developer and AI coding conversation into a concise, reusable knowledge note in strict JSON.
+Return one JSON object with keys:
+- "title": short descriptive title (at most 10 words).
+- "summary": 1 to 2 concise sentences capturing the main decision, fix, or outcome.
+- "tags": up to 8 lowercase hyphenated tags (tools, languages, hosts, components).
+- "markdown": concise Markdown using these sections (omit empty sections):
+  ## Context and Goal
+  ## Decisions Made
+  ## Changes and Outcomes
+  ## Open Questions
+Skip raw tool noise, retries, and filler. Preserve exact file names, commands, hostnames, flags, and numbers. Output raw JSON only.`
+
+	briefSystemPrompt = `You maintain a compact project brief in Markdown for AI coding assistants starting a new chat on this project.
+Synthesize the project architecture, recent conversation history and outcomes, active decisions, user preferences, and open questions from the provided documents, chat summaries, memory notes, and optional benchmarks.
+Include a Benchmarks section only when benchmark entries are provided (preserve exact numbers and units).
 Keep the brief concise, factual, and under 500 words.`
 )
+
+func buildChatDistillPrompt(cs store.ChatSession) string {
+	return fmt.Sprintf("Project: %s\nAgent: %s\nDate: %s\nWorkspace: %s\nOriginal Title: %s\n\nConversation transcript:\n%s",
+		cs.Project, cs.SourceAgent, cs.UpdatedAt.UTC().Format("2006-01-02"), cs.WorkspacePath, cs.Title, truncateRunes(cs.RawExcerpt, 20000))
+}
 
 func buildDocMetaPrompt(doc store.Document, peers []store.Document) string {
 	var b strings.Builder
@@ -83,16 +101,15 @@ func buildBriefPrompt(project string, docs []store.Document, notes []store.Note,
 		}
 		fmt.Fprintf(&b, "- %s (%s): %s - %s\n", n.ID, n.NoteType, n.Name, text)
 	}
-	b.WriteString("\n## Latest Benchmarks\n")
-	if len(benches) == 0 {
-		b.WriteString("- (none)\n")
-	}
-	for _, bm := range benches {
-		delta := ""
-		if bm.DeltaPct != nil {
-			delta = fmt.Sprintf(" (delta %.2f%%)", *bm.DeltaPct)
+	if len(benches) > 0 {
+		b.WriteString("\n## Latest Benchmarks\n")
+		for _, bm := range benches {
+			delta := ""
+			if bm.DeltaPct != nil {
+				delta = fmt.Sprintf(" (delta %.2f%%)", *bm.DeltaPct)
+			}
+			fmt.Fprintf(&b, "- %s/%s: %g %s [%s]%s\n", bm.Suite, bm.Metric, bm.Value, bm.Unit, bm.Status, delta)
 		}
-		fmt.Fprintf(&b, "- %s/%s: %g %s [%s]%s\n", bm.Suite, bm.Metric, bm.Value, bm.Unit, bm.Status, delta)
 	}
 	return b.String()
 }

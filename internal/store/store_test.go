@@ -470,3 +470,96 @@ func TestSearchFTSORLexemes(t *testing.T) {
 		})
 	}
 }
+
+func TestChatSessionStoreLifecycle(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	// Secret detection blocks raw chat ingestion.
+	_, err := s.UpsertChatSession(ctx, store.IngestChatInput{
+		SourceAgent: "claude",
+		ExternalID:  "bad-sess",
+		Project:     "krakozhia",
+		RawExcerpt:  "User: token=" + "ghp_" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890",
+	})
+	var secErr *secrets.FindingsError
+	if !errors.As(err, &secErr) {
+		t.Fatalf("expected FindingsError, got %v", err)
+	}
+
+	queued, err := s.UpsertChatSession(ctx, store.IngestChatInput{
+		SourceAgent:   "claude",
+		ExternalID:    "abc-123",
+		Project:       "krakozhia",
+		WorkspacePath: "/home/valery/projects/krakozhia",
+		Title:         "Chat design",
+		RawExcerpt:    "User: Add chat sync.\nAssistant: We will distill sessions on GPU.",
+	})
+	if err != nil || !queued {
+		t.Fatalf("UpsertChatSession 1 = %v, %v; want true, nil", queued, err)
+	}
+
+	// Re-ingesting identical content is a no-op.
+	queued2, err := s.UpsertChatSession(ctx, store.IngestChatInput{
+		SourceAgent: "claude",
+		ExternalID:  "abc-123",
+		Project:     "krakozhia",
+		Title:       "Chat design",
+		RawExcerpt:  "User: Add chat sync.\nAssistant: We will distill sessions on GPU.",
+	})
+	if err != nil || queued2 {
+		t.Fatalf("UpsertChatSession 2 = %v, %v; want false, nil", queued2, err)
+	}
+
+	hashes, err := s.ListChatHashes(ctx)
+	if err != nil || len(hashes["claude:abc-123"]) != 64 {
+		t.Fatalf("ListChatHashes = %+v, %v", hashes, err)
+	}
+
+	cs, err := s.GetChatSession(ctx, "claude:abc-123")
+	if err != nil || cs.Project != "krakozhia" || cs.RawExcerpt == "" {
+		t.Fatalf("GetChatSession = %+v, %v", cs, err)
+	}
+
+	// Save a chat document and mark session distilled, clearing raw_excerpt.
+	docRes, err := s.SaveDocument(ctx, store.SaveDocumentInput{
+		Project:       "krakozhia",
+		Name:          "chat-claude-abc-123",
+		DocType:       "chat",
+		Title:         "Chat design",
+		Summary:       "Decided to distill sessions on GPU.",
+		Tags:          []string{"chat", "gpu"},
+		Content:       "# Chat design\n\n## Decisions Made\nDistill sessions on GPU.\n",
+		SourceAgent:   "claude",
+		SkipEnrichDoc: true,
+		Chunks: []store.ChunkInput{
+			{Section: chunk.Section{Index: 0, HeadingPath: "Chat design > Decisions Made", Content: "Distill sessions on GPU."}},
+		},
+	})
+	if err != nil || docRes.ID != "krakozhia/chat-claude-abc-123" {
+		t.Fatalf("SaveDocument chat = %+v, %v", docRes, err)
+	}
+	if err := s.MarkChatDistilled(ctx, cs.ID, docRes.ID, cs.TranscriptHash); err != nil {
+		t.Fatalf("MarkChatDistilled: %v", err)
+	}
+	after, err := s.GetChatSession(ctx, cs.ID)
+	if err != nil || after.RawExcerpt != "" || after.DistilledHash != cs.TranscriptHash || after.DocumentID == nil || *after.DocumentID != docRes.ID {
+		t.Fatalf("after MarkChatDistilled = %+v, %v", after, err)
+	}
+
+	// Verify ListNotesForBrief matches both canonical project and Claude Code directory slug.
+	if err := s.UpsertNote(ctx, store.UpsertNoteInput{
+		ID:          "-home-valery-projects-krakozhia/slug-note",
+		Project:     "-home-valery-projects-krakozhia",
+		NoteType:    "project",
+		Name:        "slug-note",
+		Description: "Matches canonical krakozhia brief",
+		Content:     "Remember canonical project mapping.",
+	}); err != nil {
+		t.Fatalf("UpsertNote slug: %v", err)
+	}
+	briefNotes, err := s.ListNotesForBrief(ctx, "krakozhia", 20)
+	if err != nil || len(briefNotes) != 1 || briefNotes[0].ID != "-home-valery-projects-krakozhia/slug-note" {
+		t.Fatalf("ListNotesForBrief = %+v, %v", briefNotes, err)
+	}
+}
