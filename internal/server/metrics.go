@@ -50,16 +50,16 @@ func (w *statusRecorder) WriteHeader(code int) {
 	w.ResponseWriter.WriteHeader(code)
 }
 
+func (w *statusRecorder) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
 func (s *Server) wrapRoute(route string, h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		h.ServeHTTP(rec, r)
 		s.metrics.incHTTP(route, rec.status)
 	})
-}
-
-func (s *Server) wrapRouteFunc(route string, fn http.HandlerFunc) http.Handler {
-	return s.wrapRoute(route, fn)
 }
 
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {

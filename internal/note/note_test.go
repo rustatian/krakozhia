@@ -141,29 +141,8 @@ Details.
 	}
 }
 
-func TestProjectSlugAndLocalPath(t *testing.T) {
+func TestLocalPath(t *testing.T) {
 	t.Parallel()
-
-	cases := []struct {
-		name     string
-		dir      string
-		wantSlug string
-	}{
-		{
-			name:     "replaces slashes and dots with hyphens",
-			dir:      "/home/valery/projects/krakozhia.v2/",
-			wantSlug: "-home-valery-projects-krakozhia-v2",
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := note.ProjectSlug(tc.dir); got != tc.wantSlug {
-				t.Fatalf("ProjectSlug(%q) = %q, want %q", tc.dir, got, tc.wantSlug)
-			}
-		})
-	}
 
 	pathCases := []struct {
 		name    string

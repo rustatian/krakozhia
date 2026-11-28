@@ -63,8 +63,9 @@ func LoadConfig() (Config, error) {
 
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) && os.Getenv("KRAKOZHIA_API_TOKEN") != "" {
-			cfg.Token = os.Getenv("KRAKOZHIA_API_TOKEN")
+		if errors.Is(err, os.ErrNotExist) && strings.TrimSpace(os.Getenv("KRAKOZHIA_API_TOKEN")) != "" {
+			cfg.URL = strings.TrimSpace(cfg.URL)
+			cfg.Token = strings.TrimSpace(os.Getenv("KRAKOZHIA_API_TOKEN"))
 			return cfg, validateConfig(cfg)
 		}
 		return Config{}, fmt.Errorf("read config %s: %w", path, err)
@@ -79,8 +80,10 @@ func LoadConfig() (Config, error) {
 	if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return Config{}, fmt.Errorf("decode config %s: trailing data", path)
 	}
+	cfg.URL = strings.TrimSpace(cfg.URL)
+	cfg.Token = strings.TrimSpace(cfg.Token)
 	if cfg.Token == "" {
-		cfg.Token = os.Getenv("KRAKOZHIA_API_TOKEN")
+		cfg.Token = strings.TrimSpace(os.Getenv("KRAKOZHIA_API_TOKEN"))
 	}
 	if err := validateConfig(cfg); err != nil {
 		return Config{}, err
@@ -89,7 +92,6 @@ func LoadConfig() (Config, error) {
 }
 
 func validateConfig(cfg Config) error {
-	cfg.URL = strings.TrimSpace(cfg.URL)
 	if cfg.URL == "" {
 		return errors.New("config url is required")
 	}

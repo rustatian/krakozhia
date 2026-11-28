@@ -69,7 +69,7 @@ func runSearch(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("search", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	project := fs.String("project", "", "filter to project")
-	kind := fs.String("kind", "", "filter by record kind: note or doc")
+	kind := fs.String("kind", "", "filter by record kind: note, doc, or github")
 	typ := fs.String("type", "", "filter by document or note type")
 	tag := fs.String("tag", "", "filter by derived tag")
 	limit := fs.Int("k", 5, "maximum hits")
@@ -79,7 +79,7 @@ func runSearch(args []string, stdout io.Writer) error {
 	}
 	query := strings.TrimSpace(strings.Join(fs.Args(), " "))
 	if query == "" {
-		return errors.New("usage: krakozhia search [--project P] [--kind note|doc] [--type T] [--tag G] [-k N] [--rerank] <query>")
+		return errors.New("usage: krakozhia search [--project P] [--kind note|doc|github] [--type T] [--tag G] [-k N] [--rerank] <query>")
 	}
 
 	projectsDir, err := ProjectsDir()
@@ -106,11 +106,7 @@ func runSearch(args []string, stdout io.Writer) error {
 		return nil
 	}
 	for _, h := range resp.Hits {
-		line, ok := formatPointer(h, projectsDir)
-		if !ok {
-			continue
-		}
-		fmt.Fprintln(stdout, line)
+		fmt.Fprintln(stdout, formatPointer(h, projectsDir))
 		if snip := cleanText(truncateRunes(h.Snippet, searchSnippetRune)); snip != "" {
 			fmt.Fprintf(stdout, "  %s\n", snip)
 		}
@@ -271,7 +267,7 @@ func runSave(args []string, stdout io.Writer) error {
 	fs.SetOutput(io.Discard)
 	name := fs.String("name", "", "document name")
 	docType := fs.String("type", "", "document type: spec, plan, report, guide, decision")
-	project := fs.String("project", "", "project name (defaults to working directory slug)")
+	project := fs.String("project", "", "project name (defaults to canonical repository name)")
 	title := fs.String("title", "", "optional document title")
 	agent := fs.String("agent", cfg.SourceAgent, "source agent name")
 	if err := fs.Parse(args); err != nil {

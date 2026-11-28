@@ -174,7 +174,18 @@ func TestSyncAllGraphQLAndIdempotency(t *testing.T) {
 									{
 										"name":                  "old-archived",
 										"nameWithOwner":         "rapira-rs/old-archived",
-										"description":           "Archived repo",
+										"description":           "Never tracked archived repo",
+										"isPrivate":             false,
+										"isArchived":            true,
+										"hasDiscussionsEnabled": false,
+										"pushedAt":              ancientClosed,
+										"issues":                map[string]any{"totalCount": 0},
+										"pullRequests":          map[string]any{"totalCount": 0},
+									},
+									{
+										"name":                  "newly-archived",
+										"nameWithOwner":         "rapira-rs/newly-archived",
+										"description":           "Previously tracked repo now archived",
 										"isPrivate":             false,
 										"isArchived":            true,
 										"hasDiscussionsEnabled": false,
@@ -213,6 +224,17 @@ func TestSyncAllGraphQLAndIdempotency(t *testing.T) {
 			}
 
 		case strings.Contains(req.Query, "milestones("):
+			if owner != "rapira-rs" {
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"data": map[string]any{
+						"repository": map[string]any{
+							"milestones":   map[string]any{"nodes": []map[string]any{}},
+							"pullRequests": map[string]any{"nodes": []map[string]any{}},
+						},
+					},
+				})
+				return
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"data": map[string]any{
 					"repository": map[string]any{
@@ -234,6 +256,7 @@ func TestSyncAllGraphQLAndIdempotency(t *testing.T) {
 							"nodes": []map[string]any{
 								{
 									"number":    401,
+									"state":     "OPEN",
 									"title":     "feat: draft broker trait",
 									"body":      "Draft PR for future AMQP and Kafka brokers.",
 									"isDraft":   true,
@@ -243,6 +266,28 @@ func TestSyncAllGraphQLAndIdempotency(t *testing.T) {
 									"labels":    map[string]any{"nodes": []map[string]any{{"name": "enhancement"}}},
 									"milestone": map[string]any{"title": "v1.0"},
 								},
+								{
+									"number":    402,
+									"state":     "MERGED",
+									"title":     "feat: pool buffer reuse",
+									"body":      "Merged PR that reduced frame allocations.",
+									"isDraft":   false,
+									"url":       "https://github.com/rapira-rs/rapira/pull/402",
+									"createdAt": recentClosed,
+									"updatedAt": recentClosed,
+									"labels":    map[string]any{"nodes": []map[string]any{{"name": "performance"}}},
+								},
+								{
+									"number":    403,
+									"state":     "CLOSED",
+									"title":     "old closed PR outside lookback",
+									"body":      "Should be skipped by 90d cutoff.",
+									"isDraft":   false,
+									"url":       "https://github.com/rapira-rs/rapira/pull/403",
+									"createdAt": ancientClosed,
+									"updatedAt": ancientClosed,
+									"labels":    map[string]any{"nodes": []map[string]any{}},
+								},
 							},
 						},
 					},
@@ -250,6 +295,19 @@ func TestSyncAllGraphQLAndIdempotency(t *testing.T) {
 			})
 
 		case strings.Contains(req.Query, "issues(states: [OPEN]"):
+			if owner != "rapira-rs" {
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"data": map[string]any{
+						"repository": map[string]any{
+							"issues": map[string]any{
+								"pageInfo": map[string]any{"hasNextPage": false, "endCursor": ""},
+								"nodes":    []map[string]any{},
+							},
+						},
+					},
+				})
+				return
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"data": map[string]any{
 					"repository": map[string]any{
@@ -277,6 +335,16 @@ func TestSyncAllGraphQLAndIdempotency(t *testing.T) {
 			})
 
 		case strings.Contains(req.Query, "issues(states: [CLOSED]"):
+			if owner != "rapira-rs" {
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"data": map[string]any{
+						"repository": map[string]any{
+							"issues": map[string]any{"nodes": []map[string]any{}},
+						},
+					},
+				})
+				return
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"data": map[string]any{
 					"repository": map[string]any{
@@ -317,16 +385,15 @@ func TestSyncAllGraphQLAndIdempotency(t *testing.T) {
 						"discussions": map[string]any{
 							"nodes": []map[string]any{
 								{
-									"number":     12,
-									"title":      "RFC: Streaming RPC and Queue Architecture",
-									"body":       "Proposal for unifying streaming and queue consumers.",
-									"url":        "https://github.com/rapira-rs/rapira/discussions/12",
-									"closed":     false,
-									"isAnswered": false,
-									"createdAt":  recentOpen,
-									"updatedAt":  recentOpen,
-									"category":   map[string]any{"name": "Ideas"},
-									"labels":     map[string]any{"nodes": []map[string]any{{"name": "rfc"}}},
+									"number":    12,
+									"title":     "RFC: Streaming RPC and Queue Architecture",
+									"body":      "Proposal for unifying streaming and queue consumers.",
+									"url":       "https://github.com/rapira-rs/rapira/discussions/12",
+									"closed":    false,
+									"createdAt": recentOpen,
+									"updatedAt": recentOpen,
+									"category":  map[string]any{"name": "Ideas"},
+									"labels":    map[string]any{"nodes": []map[string]any{{"name": "rfc"}}},
 								},
 							},
 						},
@@ -339,6 +406,13 @@ func TestSyncAllGraphQLAndIdempotency(t *testing.T) {
 
 	st := newFakeSyncStore()
 	st.projByRepo["rapira-rs/rapira"] = []string{"core", "rapira"}
+	st.repos["rapira-rs/newly-archived"] = store.GitHubRepo{
+		FullName:   "rapira-rs/newly-archived",
+		Owner:      "rapira-rs",
+		Name:       "newly-archived",
+		Project:    "newly-archived",
+		IsArchived: false,
+	}
 
 	syncer := githubsync.New(githubsync.Config{
 		Store:        st,
@@ -360,17 +434,24 @@ func TestSyncAllGraphQLAndIdempotency(t *testing.T) {
 	if seenAuth["rapira-rs"] != "Bearer tok-rapira" || seenAuth["rustatian"] != "Bearer tok-default" {
 		t.Fatalf("per-owner token selection failed: %+v", seenAuth)
 	}
-	// Verify archived repo recorded as archived and skipped, ancient closed issue skipped, 4 items synced.
-	if !st.repos["rapira-rs/old-archived"].IsArchived {
-		t.Fatalf("expected archived repo recorded as archived")
+	// Verify untracked archived repo is not inserted, tracked archived repo is updated, ancient closed items are skipped, and 5 items are synced.
+	if _, exists := st.repos["rapira-rs/old-archived"]; exists {
+		t.Fatalf("untracked archived repo should not be inserted")
+	}
+	if !st.repos["rapira-rs/newly-archived"].IsArchived {
+		t.Fatalf("previously tracked archived repo should be marked archived")
 	}
 	if _, exists := st.items["rapira-rs/rapira#issue:5"]; exists {
 		t.Fatalf("ancient closed issue #5 should have been skipped")
+	}
+	if _, exists := st.items["rapira-rs/rapira#pr:403"]; exists {
+		t.Fatalf("ancient closed PR #403 should have been skipped")
 	}
 	for _, wantID := range []string{
 		"rapira-rs/rapira#issue:37",
 		"rapira-rs/rapira#issue:30",
 		"rapira-rs/rapira#pr:401",
+		"rapira-rs/rapira#pr:402",
 		"rapira-rs/rapira#discussion:12",
 	} {
 		if _, ok := st.items[wantID]; !ok {
@@ -387,15 +468,17 @@ func TestSyncAllGraphQLAndIdempotency(t *testing.T) {
 	if st.items["rapira-rs/rapira#pr:401"].State != "draft" {
 		t.Fatalf("draft PR state = %q, want draft", st.items["rapira-rs/rapira#pr:401"].State)
 	}
-	// Verify roadmap jobs enqueued for BOTH mapped projects ("core" and "rapira") plus org roadmap ("rapira-rs").
-	for _, wantJob := range []string{
+	if st.items["rapira-rs/rapira#pr:402"].State != "merged" {
+		t.Fatalf("merged PR state = %q, want merged", st.items["rapira-rs/rapira#pr:402"].State)
+	}
+	// Verify org roadmap job is enqueued before mapped project roadmap jobs.
+	wantJobs := []string{
+		"distill_org_roadmap:org:rapira-rs",
 		"distill_project_roadmap:project:core",
 		"distill_project_roadmap:project:rapira",
-		"distill_org_roadmap:org:rapira-rs",
-	} {
-		if !slices.Contains(st.jobs, wantJob) {
-			t.Fatalf("missing enqueued job %q in %v", wantJob, st.jobs)
-		}
+	}
+	if !slices.Equal(st.jobs, wantJobs) {
+		t.Fatalf("enqueued jobs = %v, want %v", st.jobs, wantJobs)
 	}
 
 	// Second identical sync must enqueue zero new roadmap jobs.

@@ -22,17 +22,11 @@ import (
 	"github.com/rustatian/krakozhia/internal/store"
 )
 
-// GitHubSyncer runs on-demand synchronization of allowlisted GitHub owners.
-type GitHubSyncer interface {
-	SyncAll(ctx context.Context) (githubsync.SyncSummary, error)
-}
-
-// InferenceClient abstracts embedding, chat, reranking, and health checks.
+// InferenceClient abstracts embedding, reranking, and health checks.
 type InferenceClient interface {
 	Health(ctx context.Context) error
 	EmbedQuery(ctx context.Context, text string) ([]float32, error)
 	EmbedDocument(ctx context.Context, text string) ([]float32, error)
-	Chat(ctx context.Context, systemPrompt, userPrompt string, maxTokens int) (string, error)
 	Rerank(ctx context.Context, query string, docs []string) ([]inference.RerankResult, error)
 }
 
@@ -40,7 +34,7 @@ type InferenceClient interface {
 type Config struct {
 	Store        *store.Store
 	Inference    InferenceClient
-	GitHubSyncer GitHubSyncer
+	GitHubSyncer *githubsync.Syncer
 	Token        string
 	Version      string
 	WebUI        http.Handler
@@ -50,7 +44,7 @@ type Config struct {
 type Server struct {
 	store     *store.Store
 	inf       InferenceClient
-	ghSyncer  GitHubSyncer
+	ghSyncer  *githubsync.Syncer
 	token     string
 	version   string
 	webUI     http.Handler
@@ -86,8 +80,8 @@ func New(cfg Config) *Server {
 // Handler returns the configured HTTP router.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("GET /healthz", s.wrapRouteFunc("GET /healthz", s.handleHealthz))
-	mux.Handle("GET /metrics", s.wrapRouteFunc("GET /metrics", s.handleMetrics))
+	mux.Handle("GET /healthz", s.wrapRoute("GET /healthz", http.HandlerFunc(s.handleHealthz)))
+	mux.Handle("GET /metrics", s.wrapRoute("GET /metrics", http.HandlerFunc(s.handleMetrics)))
 
 	mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
 		return s.mcpServer
@@ -96,22 +90,22 @@ func (s *Server) Handler() http.Handler {
 	})
 	mux.Handle("/mcp", s.wrapRoute("/mcp", s.requireAuth(mcpHandler)))
 
-	mux.Handle("POST /api/v1/search", s.wrapRoute("POST /api/v1/search", s.requireAuthFunc(s.handleSearch)))
-	mux.Handle("POST /api/v1/documents", s.wrapRoute("POST /api/v1/documents", s.requireAuthFunc(s.handleSaveDocument)))
-	mux.Handle("GET /api/v1/documents", s.wrapRoute("GET /api/v1/documents", s.requireAuthFunc(s.handleListDocuments)))
-	mux.Handle("GET /api/v1/documents/get", s.wrapRoute("GET /api/v1/documents/get", s.requireAuthFunc(s.handleGetDocument)))
-	mux.Handle("DELETE /api/v1/documents", s.wrapRoute("DELETE /api/v1/documents", s.requireAuthFunc(s.handleDeleteDocument)))
-	mux.Handle("GET /api/v1/notes/hashes", s.wrapRoute("GET /api/v1/notes/hashes", s.requireAuthFunc(s.handleListNoteHashes)))
-	mux.Handle("POST /api/v1/notes", s.wrapRoute("POST /api/v1/notes", s.requireAuthFunc(s.handleSaveNote)))
-	mux.Handle("POST /api/v1/notes/sync", s.wrapRoute("POST /api/v1/notes/sync", s.requireAuthFunc(s.handleSyncNotes)))
-	mux.Handle("GET /api/v1/notes/get", s.wrapRoute("GET /api/v1/notes/get", s.requireAuthFunc(s.handleGetNote)))
-	mux.Handle("GET /api/v1/chats/hashes", s.wrapRoute("GET /api/v1/chats/hashes", s.requireAuthFunc(s.handleListChatHashes)))
-	mux.Handle("POST /api/v1/chats/ingest", s.wrapRoute("POST /api/v1/chats/ingest", s.requireAuthFunc(s.handleIngestChats)))
-	mux.Handle("POST /api/v1/github/sync", s.wrapRoute("POST /api/v1/github/sync", s.requireAuthFunc(s.handleSyncGitHub)))
-	mux.Handle("POST /api/v1/benchmarks", s.wrapRoute("POST /api/v1/benchmarks", s.requireAuthFunc(s.handleRecordBenchmark)))
-	mux.Handle("GET /api/v1/benchmarks", s.wrapRoute("GET /api/v1/benchmarks", s.requireAuthFunc(s.handleQueryBenchmarks)))
-	mux.Handle("GET /api/v1/benchmarks/compare", s.wrapRoute("GET /api/v1/benchmarks/compare", s.requireAuthFunc(s.handleCompareBenchmarks)))
-	mux.Handle("GET /api/v1/briefs", s.wrapRoute("GET /api/v1/briefs", s.requireAuthFunc(s.handleGetBrief)))
+	s.handleAuthed(mux, "POST /api/v1/search", s.handleSearch)
+	s.handleAuthed(mux, "POST /api/v1/documents", s.handleSaveDocument)
+	s.handleAuthed(mux, "GET /api/v1/documents", s.handleListDocuments)
+	s.handleAuthed(mux, "GET /api/v1/documents/get", s.handleGetDocument)
+	s.handleAuthed(mux, "DELETE /api/v1/documents", s.handleDeleteDocument)
+	s.handleAuthed(mux, "GET /api/v1/notes/hashes", s.handleListNoteHashes)
+	s.handleAuthed(mux, "POST /api/v1/notes", s.handleSaveNote)
+	s.handleAuthed(mux, "POST /api/v1/notes/sync", s.handleSyncNotes)
+	s.handleAuthed(mux, "GET /api/v1/notes/get", s.handleGetNote)
+	s.handleAuthed(mux, "GET /api/v1/chats/hashes", s.handleListChatHashes)
+	s.handleAuthed(mux, "POST /api/v1/chats/ingest", s.handleIngestChats)
+	s.handleAuthed(mux, "POST /api/v1/github/sync", s.handleSyncGitHub)
+	s.handleAuthed(mux, "POST /api/v1/benchmarks", s.handleRecordBenchmark)
+	s.handleAuthed(mux, "GET /api/v1/benchmarks", s.handleQueryBenchmarks)
+	s.handleAuthed(mux, "GET /api/v1/benchmarks/compare", s.handleCompareBenchmarks)
+	s.handleAuthed(mux, "GET /api/v1/briefs", s.handleGetBrief)
 
 	if s.webUI != nil {
 		mux.Handle("/", s.wrapRoute("UI", s.webUI))
@@ -124,8 +118,8 @@ func (s *Server) Search(ctx context.Context, req SearchRequest) (SearchResponse,
 	return s.searchKnowledge(ctx, req)
 }
 
-func (s *Server) requireAuthFunc(fn http.HandlerFunc) http.Handler {
-	return s.requireAuth(fn)
+func (s *Server) handleAuthed(mux *http.ServeMux, pattern string, fn http.HandlerFunc) {
+	mux.Handle(pattern, s.wrapRoute(pattern, s.requireAuth(fn)))
 }
 
 func (s *Server) requireAuth(next http.Handler) http.Handler {

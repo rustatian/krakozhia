@@ -218,7 +218,7 @@ func (s *Syncer) SyncAll(ctx context.Context) (SyncSummary, error) {
 			continue
 		}
 		sum.Owners++
-		ownerSum, ownerChanged, err := s.syncOwner(ctx, owner, tok)
+		ownerSum, changedProjects, err := s.syncOwner(ctx, owner, tok)
 		sum.ReposScanned += ownerSum.ReposScanned
 		sum.ItemsUpserted += ownerSum.ItemsUpserted
 		sum.ItemsChanged += ownerSum.ItemsChanged
@@ -227,9 +227,15 @@ func (s *Syncer) SyncAll(ctx context.Context) (SyncSummary, error) {
 			sum.Errors = append(sum.Errors, fmt.Sprintf("%s: %v", owner, err))
 			continue
 		}
-		if ownerChanged {
+		if len(changedProjects) > 0 {
+			// Enqueue the org roadmap before project roadmaps so project synthesis sees the updated org direction.
 			if err := s.store.EnqueueJob(ctx, "distill_org_roadmap", "org", owner); err != nil {
 				sum.Errors = append(sum.Errors, fmt.Sprintf("%s enqueue org roadmap: %v", owner, err))
+			}
+			for _, proj := range changedProjects {
+				if err := s.store.EnqueueJob(ctx, "distill_project_roadmap", "project", proj); err != nil {
+					sum.Errors = append(sum.Errors, fmt.Sprintf("%s enqueue roadmap %s: %v", owner, proj, err))
+				}
 			}
 		}
 	}
@@ -259,33 +265,27 @@ type gqlRepoNode struct {
 	} `json:"pullRequests"`
 }
 
-func (s *Syncer) syncOwner(ctx context.Context, owner, token string) (SyncSummary, bool, error) {
+func (s *Syncer) syncOwner(ctx context.Context, owner, token string) (SyncSummary, []string, error) {
 	repos, err := s.listOwnerRepos(ctx, owner, token)
 	if err != nil {
-		return SyncSummary{}, false, err
+		return SyncSummary{}, nil, err
 	}
 
 	var sum SyncSummary
-	ownerChanged := false
+	var changedProjects []string
+	seenProj := map[string]bool{}
 	cutoff := s.now().Add(-s.closedLookback)
 
 	for _, r := range repos {
 		if ctx.Err() != nil {
-			return sum, ownerChanged, ctx.Err()
+			return sum, changedProjects, ctx.Err()
 		}
 		pushedAt := parseOptionalTime(r.PushedAt)
 		if r.IsArchived {
-			_ = s.store.UpsertGitHubRepo(ctx, store.GitHubRepo{
-				FullName:       r.NameWithOwner,
-				Owner:          owner,
-				Name:           r.Name,
-				Project:        r.Name,
-				Description:    strings.TrimSpace(r.Description),
-				IsPrivate:      r.IsPrivate,
-				IsArchived:     true,
-				HasDiscussions: r.HasDiscussionsEnabled,
-				PushedAt:       pushedAt,
-			})
+			if existing, err := s.store.GetGitHubRepo(ctx, r.NameWithOwner); err == nil && !existing.IsArchived {
+				existing.IsArchived = true
+				_ = s.store.UpsertGitHubRepo(ctx, existing)
+			}
 			continue
 		}
 
@@ -309,25 +309,39 @@ func (s *Syncer) syncOwner(ctx context.Context, owner, token string) (SyncSummar
 			PushedAt:       pushedAt,
 			LastSyncedAt:   &now,
 		}
-		if err := s.store.UpsertGitHubRepo(ctx, repoRecord); err != nil {
-			sum.Errors = append(sum.Errors, fmt.Sprintf("%s: upsert repo: %v", r.NameWithOwner, err))
-			continue
+		// Ensure newly discovered repos exist in github_repos before child milestone/item foreign keys.
+		if errors.Is(getErr, store.ErrNotFound) {
+			if err := s.store.UpsertGitHubRepo(ctx, repoRecord); err != nil {
+				sum.Errors = append(sum.Errors, fmt.Sprintf("%s: upsert repo: %v", r.NameWithOwner, err))
+				continue
+			}
 		}
 
-		// Skip GraphQL item fetches for dormant repos with zero open issues, zero open PRs, and no Discussions.
+		// Skip GraphQL item fetches for dormant repos with zero open issues/PRs and no prior synced items.
 		dormant := r.Issues.TotalCount == 0 && r.PullRequests.TotalCount == 0 && !r.HasDiscussionsEnabled &&
-			(pushedAt == nil || pushedAt.Before(cutoff))
+			existing.SyncHash == "" && (pushedAt == nil || pushedAt.Before(cutoff))
 		if dormant {
+			if !errors.Is(getErr, store.ErrNotFound) {
+				_ = s.store.UpsertGitHubRepo(ctx, repoRecord)
+			}
 			continue
 		}
 
 		milestones, items, warnErrs := s.fetchRepoData(ctx, owner, r.Name, r.NameWithOwner, r.HasDiscussionsEnabled, cutoff, token)
 		sum.Errors = append(sum.Errors, warnErrs...)
 
+		syncHash := computeRepoSyncHash(r.Description, milestones, items)
+		repoRecord.SyncHash = syncHash
+		if err := s.store.UpsertGitHubRepo(ctx, repoRecord); err != nil {
+			sum.Errors = append(sum.Errors, fmt.Sprintf("%s: save sync hash: %v", r.NameWithOwner, err))
+		}
+		if !errors.Is(getErr, store.ErrNotFound) && existing.SyncHash == syncHash {
+			continue
+		}
+
 		if err := s.store.UpsertGitHubMilestones(ctx, r.NameWithOwner, milestones); err != nil {
 			sum.Errors = append(sum.Errors, fmt.Sprintf("%s: milestones: %v", r.NameWithOwner, err))
 		}
-
 		for i := range items {
 			sum.ItemsUpserted++
 			changed, err := s.store.UpsertGitHubItem(ctx, items[i])
@@ -340,28 +354,21 @@ func (s *Syncer) syncOwner(ctx context.Context, owner, token string) (SyncSummar
 			}
 		}
 
-		syncHash := computeRepoSyncHash(r.Description, milestones, items)
-		repoRecord.SyncHash = syncHash
-		if err := s.store.UpsertGitHubRepo(ctx, repoRecord); err != nil {
-			sum.Errors = append(sum.Errors, fmt.Sprintf("%s: save sync hash: %v", r.NameWithOwner, err))
-		}
-
-		hasRoadmapMaterial := len(items) > 0 || len(milestones) > 0
-		if hasRoadmapMaterial && (errors.Is(getErr, store.ErrNotFound) || existing.SyncHash != syncHash) {
-			ownerChanged = true
+		if len(items) > 0 || len(milestones) > 0 {
 			projects, err := s.store.ListProjectsForRepo(ctx, r.NameWithOwner)
 			if err != nil {
 				sum.Errors = append(sum.Errors, fmt.Sprintf("%s: list projects: %v", r.NameWithOwner, err))
 				continue
 			}
 			for _, proj := range projects {
-				if err := s.store.EnqueueJob(ctx, "distill_project_roadmap", "project", proj); err != nil {
-					sum.Errors = append(sum.Errors, fmt.Sprintf("%s enqueue roadmap %s: %v", r.NameWithOwner, proj, err))
+				if !seenProj[proj] {
+					seenProj[proj] = true
+					changedProjects = append(changedProjects, proj)
 				}
 			}
 		}
 	}
-	return sum, ownerChanged, nil
+	return sum, changedProjects, nil
 }
 
 const listOwnerReposQuery = `
@@ -430,9 +437,10 @@ query($owner: String!, $name: String!) {
         closedIssues: issues(states: [CLOSED]) { totalCount }
       }
     }
-    pullRequests(states: [OPEN], first: 50, orderBy: {field: UPDATED_AT, direction: DESC}) {
+    pullRequests(first: 50, orderBy: {field: UPDATED_AT, direction: DESC}) {
       nodes {
         number
+        state
         title
         body
         isDraft
@@ -501,7 +509,6 @@ query($owner: String!, $name: String!) {
         body
         url
         closed
-        isAnswered
         createdAt
         updatedAt
         category { name }
@@ -557,12 +564,12 @@ func (s *Syncer) fetchRepoData(
 		Repository *struct {
 			Milestones struct {
 				Nodes []struct {
-					Number       int    `json:"number"`
-					Title        string `json:"title"`
-					Description  string `json:"description"`
-					State        string `json:"state"`
-					DueOn        string `json:"dueOn"`
-					UpdatedAt    string `json:"updatedAt"`
+					Number       int                      `json:"number"`
+					Title        string                   `json:"title"`
+					Description  string                   `json:"description"`
+					State        string                   `json:"state"`
+					DueOn        string                   `json:"dueOn"`
+					UpdatedAt    string                   `json:"updatedAt"`
 					OpenIssues   struct{ TotalCount int } `json:"openIssues"`
 					ClosedIssues struct{ TotalCount int } `json:"closedIssues"`
 				} `json:"nodes"`
@@ -570,6 +577,7 @@ func (s *Syncer) fetchRepoData(
 			PullRequests struct {
 				Nodes []struct {
 					Number    int    `json:"number"`
+					State     string `json:"state"`
 					Title     string `json:"title"`
 					Body      string `json:"body"`
 					IsDraft   bool   `json:"isDraft"`
@@ -606,9 +614,16 @@ func (s *Syncer) fetchRepoData(
 			})
 		}
 		for _, pr := range mpResp.Repository.PullRequests.Nodes {
-			state := "open"
-			if pr.IsDraft {
-				state = "draft"
+			updated := parseTimeOrNow(pr.UpdatedAt, s.now())
+			state := strings.ToLower(strings.TrimSpace(pr.State))
+			if state == "" || state == "open" {
+				if pr.IsDraft {
+					state = "draft"
+				} else {
+					state = "open"
+				}
+			} else if updated.Before(closedCutoff) {
+				continue
 			}
 			var labels []string
 			for _, l := range pr.Labels.Nodes {
@@ -632,7 +647,7 @@ func (s *Syncer) fetchRepoData(
 				MilestoneTitle:  msTitle,
 				URL:             pr.URL,
 				GitHubCreatedAt: parseTimeOrNow(pr.CreatedAt, s.now()),
-				GitHubUpdatedAt: parseTimeOrNow(pr.UpdatedAt, s.now()),
+				GitHubUpdatedAt: updated,
 			}))
 		}
 	}
@@ -693,15 +708,14 @@ func (s *Syncer) fetchRepoData(
 			Repository *struct {
 				Discussions struct {
 					Nodes []struct {
-						Number     int    `json:"number"`
-						Title      string `json:"title"`
-						Body       string `json:"body"`
-						URL        string `json:"url"`
-						Closed     bool   `json:"closed"`
-						IsAnswered bool   `json:"isAnswered"`
-						CreatedAt  string `json:"createdAt"`
-						UpdatedAt  string `json:"updatedAt"`
-						Category   *struct {
+						Number    int    `json:"number"`
+						Title     string `json:"title"`
+						Body      string `json:"body"`
+						URL       string `json:"url"`
+						Closed    bool   `json:"closed"`
+						CreatedAt string `json:"createdAt"`
+						UpdatedAt string `json:"updatedAt"`
+						Category  *struct {
 							Name string `json:"name"`
 						} `json:"category"`
 						Labels struct {
@@ -803,18 +817,7 @@ func sanitizeItem(it store.GitHubItem) store.GitHubItem {
 	body, _ := secrets.Redact(truncateRunes(strings.TrimSpace(it.Body), maxItemBodyRunes))
 	it.Title = title
 	it.Body = body
-	h := sha256.New()
-	parent := 0
-	if it.ParentNumber != nil {
-		parent = *it.ParentNumber
-	}
-	labels := append([]string(nil), it.Labels...)
-	slices.Sort(labels)
-	fmt.Fprintf(h, "%s|%s|%d|%s|%s|%s|%s|%s|%d|%d|%d|%s",
-		it.RepoFullName, it.Kind, it.Number, it.State, it.IssueType,
-		it.Title, strings.Join(labels, ","), it.MilestoneTitle, parent,
-		it.SubIssuesTotal, it.SubIssuesCompleted, it.Body)
-	it.ContentHash = hex.EncodeToString(h.Sum(nil))
+	it.ContentHash = store.HashGitHubItem(it)
 	return it
 }
 

@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -127,7 +126,11 @@ func runRecall(stdin io.Reader, stdout io.Writer) error {
 	}
 	if currentProject != "" {
 		homeDir, _ := os.UserHomeDir()
-		currentProject = chats.ResolveClaudeFolderProject(projectsDir, currentProject, homeDir)
+		if cwd := chats.FirstClaudeCwd(in.TranscriptPath); cwd != "" {
+			currentProject = chats.ResolveProject(cwd, homeDir)
+		} else {
+			currentProject = chats.ResolveClaudeFolderProject(projectsDir, currentProject, homeDir)
+		}
 		entry.Project = currentProject
 	}
 
@@ -170,10 +173,7 @@ func runRecall(stdin io.Reader, stdout io.Writer) error {
 		if sentMap[h.ID] {
 			continue
 		}
-		line, ok := formatPointer(h, projectsDir)
-		if !ok {
-			continue
-		}
+		line := formatPointer(h, projectsDir)
 		lines = append(lines, line)
 		newlySent = append(newlySent, h.ID)
 		sentMap[h.ID] = true
@@ -199,7 +199,7 @@ func runRecall(stdin io.Reader, stdout io.Writer) error {
 	return nil
 }
 
-func formatPointer(h store.SearchHit, projectsDir string) (string, bool) {
+func formatPointer(h store.SearchHit, projectsDir string) string {
 	date := h.UpdatedAt.UTC().Format(time.DateOnly)
 	if h.Kind == "doc" {
 		heading := cleanText(h.HeadingPath)
@@ -207,7 +207,7 @@ func formatPointer(h store.SearchHit, projectsDir string) (string, bool) {
 			heading = ": " + heading
 		}
 		return fmt.Sprintf("- %s%s (project %s, %s, saved %s). Read: krakozhia show %s",
-			cleanText(h.Title), heading, cleanText(h.Project), cleanText(h.Type), date, cleanText(h.ID)), true
+			cleanText(h.Title), heading, cleanText(h.Project), cleanText(h.Type), date, cleanText(h.ID))
 	}
 	if h.Kind == "github" {
 		ref := cleanText(h.HeadingPath)
@@ -216,10 +216,10 @@ func formatPointer(h store.SearchHit, projectsDir string) (string, bool) {
 		}
 		if h.URL != "" {
 			return fmt.Sprintf("- %s (%s, project %s, %s, updated %s). URL: %s",
-				cleanText(h.Title), ref, cleanText(h.Project), cleanText(h.Type), date, cleanText(h.URL)), true
+				cleanText(h.Title), ref, cleanText(h.Project), cleanText(h.Type), date, cleanText(h.URL))
 		}
 		return fmt.Sprintf("- %s (%s, project %s, %s, updated %s)",
-			cleanText(h.Title), ref, cleanText(h.Project), cleanText(h.Type), date), true
+			cleanText(h.Title), ref, cleanText(h.Project), cleanText(h.Type), date)
 	}
 
 	desc := cleanText(truncateRunes(h.Description, maxDescRunes))
@@ -234,7 +234,7 @@ func formatPointer(h store.SearchHit, projectsDir string) (string, bool) {
 		}
 	}
 	return fmt.Sprintf("- %s (project %s, type %s, updated %s): %s. %s",
-		cleanText(h.Title), cleanText(h.Project), cleanText(h.Type), date, desc, action), true
+		cleanText(h.Title), cleanText(h.Project), cleanText(h.Type), date, desc, action)
 }
 
 func cleanText(s string) string {
@@ -296,9 +296,6 @@ func loadSentSession(stateDir, sessionID string) (map[string]bool, string) {
 	sessFile := filepath.Join(stateDir, "sessions", safe)
 	f, err := os.Open(sessFile)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return seen, sessFile
-		}
 		return seen, sessFile
 	}
 	defer f.Close()

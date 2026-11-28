@@ -22,7 +22,6 @@ type Note struct {
 	Description string
 	Content     string
 	ContentHash string
-	FilePath    string
 	UpdatedAt   time.Time
 }
 
@@ -69,7 +68,6 @@ func ScanDir(projectsDir string) ([]Note, []string, error) {
 			Description: desc,
 			Content:     content,
 			ContentHash: hex.EncodeToString(sum[:]),
-			FilePath:    p,
 			UpdatedAt:   updatedAt,
 		})
 	}
@@ -77,13 +75,6 @@ func ScanDir(projectsDir string) ([]Note, []string, error) {
 		return strings.Compare(a.ID, b.ID)
 	})
 	return notes, warnings, nil
-}
-
-// ProjectSlug converts a directory path to the folder name convention used by Claude Code.
-func ProjectSlug(dir string) string {
-	clean := filepath.Clean(dir)
-	r := strings.NewReplacer("/", "-", ".", "-")
-	return r.Replace(clean)
 }
 
 // LocalPath returns the workstation file path for a note ID, or "" if the ID is unsafe.
