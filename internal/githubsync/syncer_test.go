@@ -68,6 +68,37 @@ func TestParseOwnerConfig(t *testing.T) {
 			}
 		})
 	}
+
+	repoCases := []struct {
+		name string
+		raw  string
+		want []string
+	}{
+		{
+			name: "trims validates and deduplicates owner/repo entries",
+			raw:  " rustatian/krakozhia , rustatian/redlamp.me, RUSTATIAN/KRAKOZHIA, rustatian/rustatian.me ",
+			want: []string{"rustatian/krakozhia", "rustatian/redlamp.me", "rustatian/rustatian.me"},
+		},
+		{
+			name: "skips malformed entries without single slash",
+			raw:  "badentry, a/b/c, /missing-owner, missing-repo/, rustatian/jak-tam-to-slowo",
+			want: []string{"rustatian/jak-tam-to-slowo"},
+		},
+		{
+			name: "empty string returns nil",
+			raw:  "   ",
+			want: nil,
+		},
+	}
+	for _, tc := range repoCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := githubsync.ParseRepos(tc.raw)
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("ParseRepos(%q) = %v, want %v", tc.raw, got, tc.want)
+			}
+		})
+	}
 }
 
 type fakeSyncStore struct {
@@ -489,5 +520,106 @@ func TestSyncAllGraphQLAndIdempotency(t *testing.T) {
 	}
 	if len(st.jobs) != 0 || sum2.ItemsChanged != 0 {
 		t.Fatalf("second identical sync not idempotent: jobs=%v summary=%+v", st.jobs, sum2)
+	}
+}
+
+func TestSyncStandaloneReposSkipsOrgRoadmap(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 11, 28, 13, 0, 0, 0, time.UTC)
+	recentOpen := now.Add(-1 * time.Hour).Format(time.RFC3339)
+
+	gqlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Query     string         `json:"query"`
+			Variables map[string]any `json:"variables"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+
+		switch {
+		case strings.Contains(req.Query, "hasDiscussionsEnabled") && !strings.Contains(req.Query, "repositoryOwner"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{
+					"repository": map[string]any{
+						"name":                  "krakozhia",
+						"nameWithOwner":         "rustatian/krakozhia",
+						"description":           "Self-hosted AI knowledge base",
+						"isPrivate":             false,
+						"isArchived":            false,
+						"hasDiscussionsEnabled": false,
+						"pushedAt":              recentOpen,
+						"issues":                map[string]any{"totalCount": 1},
+						"pullRequests":          map[string]any{"totalCount": 0},
+					},
+				},
+			})
+		case strings.Contains(req.Query, "milestones("):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{
+					"repository": map[string]any{
+						"milestones":   map[string]any{"nodes": []map[string]any{}},
+						"pullRequests": map[string]any{"nodes": []map[string]any{}},
+					},
+				},
+			})
+		case strings.Contains(req.Query, "issues(states: [OPEN]"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{
+					"repository": map[string]any{
+						"issues": map[string]any{
+							"pageInfo": map[string]any{"hasNextPage": false, "endCursor": ""},
+							"nodes": []map[string]any{
+								{
+									"number":           40,
+									"state":            "OPEN",
+									"title":            "Allow standalone personal repositories",
+									"body":             "Sync selected personal repos without an org roadmap.",
+									"url":              "https://github.com/rustatian/krakozhia/issues/40",
+									"createdAt":        recentOpen,
+									"updatedAt":        recentOpen,
+									"labels":           map[string]any{"nodes": []map[string]any{{"name": "enhancement"}}},
+									"subIssuesSummary": map[string]any{"total": 0, "completed": 0},
+								},
+							},
+						},
+					},
+				},
+			})
+		case strings.Contains(req.Query, "issues(states: [CLOSED]"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{
+					"repository": map[string]any{
+						"issues": map[string]any{"nodes": []map[string]any{}},
+					},
+				},
+			})
+		}
+	}))
+	defer gqlSrv.Close()
+
+	st := newFakeSyncStore()
+	syncer := githubsync.New(githubsync.Config{
+		Store:        st,
+		Repos:        []string{"rustatian/krakozhia"},
+		DefaultToken: "tok-default",
+		GraphQLURL:   gqlSrv.URL,
+		Now:          func() time.Time { return now },
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+
+	sum, err := syncer.SyncAll(context.Background())
+	if err != nil {
+		t.Fatalf("SyncAll: %v", err)
+	}
+	if sum.Owners != 0 || sum.ReposScanned != 1 || sum.ItemsChanged != 1 || len(sum.Errors) != 0 {
+		t.Fatalf("unexpected summary: %+v", sum)
+	}
+	wantJobs := []string{"distill_project_roadmap:project:krakozhia"}
+	if !slices.Equal(st.jobs, wantJobs) {
+		t.Fatalf("enqueued jobs = %v, want %v (must not enqueue org roadmap)", st.jobs, wantJobs)
 	}
 }

@@ -44,6 +44,7 @@ type Store interface {
 type Config struct {
 	Store          Store
 	Owners         []string
+	Repos          []string
 	DefaultToken   string
 	OwnerTokens    map[string]string
 	GraphQLURL     string
@@ -63,10 +64,11 @@ type SyncSummary struct {
 	Errors        []string `json:"errors,omitempty"`
 }
 
-// Syncer polls allowlisted GitHub owners and updates PostgreSQL roadmap tables.
+// Syncer polls allowlisted GitHub owners and standalone repos and updates PostgreSQL roadmap tables.
 type Syncer struct {
 	store          Store
 	owners         []string
+	repos          []string
 	defaultToken   string
 	ownerTokens    map[string]string
 	graphqlURL     string
@@ -113,6 +115,7 @@ func New(cfg Config) *Syncer {
 	return &Syncer{
 		store:          cfg.Store,
 		owners:         cfg.Owners,
+		repos:          cfg.Repos,
 		defaultToken:   strings.TrimSpace(cfg.DefaultToken),
 		ownerTokens:    tokens,
 		graphqlURL:     gqlURL,
@@ -143,6 +146,27 @@ func ParseOwners(raw string) []string {
 	return out
 }
 
+// ParseRepos splits a comma-separated list of standalone "owner/repo" names into deduplicated entries.
+func ParseRepos(raw string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, part := range strings.Split(raw, ",") {
+		v := strings.TrimSpace(part)
+		owner, name, ok := store.ParseGitHubRepo(v)
+		if !ok {
+			continue
+		}
+		full := owner + "/" + name
+		key := strings.ToLower(full)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, full)
+	}
+	return out
+}
+
 // ParseOwnerTokens parses comma- or semicolon-separated "owner=token" overrides.
 func ParseOwnerTokens(raw string) map[string]string {
 	out := map[string]string{}
@@ -163,7 +187,7 @@ func ParseOwnerTokens(raw string) map[string]string {
 
 // Run executes an initial delayed sync and then repeats on SyncInterval until ctx is canceled.
 func (s *Syncer) Run(ctx context.Context) {
-	if len(s.owners) == 0 {
+	if len(s.owners) == 0 && len(s.repos) == 0 {
 		return
 	}
 	delay := time.NewTimer(startupSyncDelay)
@@ -202,12 +226,13 @@ func (s *Syncer) runOnceLogged(ctx context.Context) {
 	)
 }
 
-// SyncAll synchronizes every allowlisted owner sequentially and queues roadmap jobs for changed repos and orgs.
+// SyncAll synchronizes allowlisted owners and standalone repos sequentially and queues roadmap jobs for changes.
 func (s *Syncer) SyncAll(ctx context.Context) (SyncSummary, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	var sum SyncSummary
+	syncedRepos := map[string]bool{}
 	for _, owner := range s.owners {
 		if ctx.Err() != nil {
 			return sum, ctx.Err()
@@ -218,7 +243,7 @@ func (s *Syncer) SyncAll(ctx context.Context) (SyncSummary, error) {
 			continue
 		}
 		sum.Owners++
-		ownerSum, changedProjects, err := s.syncOwner(ctx, owner, tok)
+		ownerSum, changedProjects, err := s.syncOwner(ctx, owner, tok, syncedRepos)
 		sum.ReposScanned += ownerSum.ReposScanned
 		sum.ItemsUpserted += ownerSum.ItemsUpserted
 		sum.ItemsChanged += ownerSum.ItemsChanged
@@ -236,6 +261,43 @@ func (s *Syncer) SyncAll(ctx context.Context) (SyncSummary, error) {
 				if err := s.store.EnqueueJob(ctx, "distill_project_roadmap", "project", proj); err != nil {
 					sum.Errors = append(sum.Errors, fmt.Sprintf("%s enqueue roadmap %s: %v", owner, proj, err))
 				}
+			}
+		}
+	}
+
+	// Sync standalone allowlisted repos without generating an org-level roadmap across unrelated repositories.
+	cutoff := s.now().Add(-s.closedLookback)
+	seenStandaloneProj := map[string]bool{}
+	for _, fullName := range s.repos {
+		if ctx.Err() != nil {
+			return sum, ctx.Err()
+		}
+		if syncedRepos[strings.ToLower(fullName)] {
+			continue
+		}
+		owner, name, ok := store.ParseGitHubRepo(fullName)
+		if !ok {
+			continue
+		}
+		tok := s.tokenForOwner(owner)
+		if tok == "" {
+			sum.Errors = append(sum.Errors, fmt.Sprintf("%s: no GitHub token configured", fullName))
+			continue
+		}
+		node, err := s.fetchRepoMeta(ctx, owner, name, tok)
+		if err != nil {
+			sum.Errors = append(sum.Errors, fmt.Sprintf("%s: %v", fullName, err))
+			continue
+		}
+		syncedRepos[strings.ToLower(node.NameWithOwner)] = true
+		repoSum, changedProjects := s.syncRepoNode(ctx, owner, node, cutoff, tok, seenStandaloneProj)
+		sum.ReposScanned += repoSum.ReposScanned
+		sum.ItemsUpserted += repoSum.ItemsUpserted
+		sum.ItemsChanged += repoSum.ItemsChanged
+		sum.Errors = append(sum.Errors, repoSum.Errors...)
+		for _, proj := range changedProjects {
+			if err := s.store.EnqueueJob(ctx, "distill_project_roadmap", "project", proj); err != nil {
+				sum.Errors = append(sum.Errors, fmt.Sprintf("%s enqueue roadmap %s: %v", fullName, proj, err))
 			}
 		}
 	}
@@ -265,7 +327,7 @@ type gqlRepoNode struct {
 	} `json:"pullRequests"`
 }
 
-func (s *Syncer) syncOwner(ctx context.Context, owner, token string) (SyncSummary, []string, error) {
+func (s *Syncer) syncOwner(ctx context.Context, owner, token string, syncedRepos map[string]bool) (SyncSummary, []string, error) {
 	repos, err := s.listOwnerRepos(ctx, owner, token)
 	if err != nil {
 		return SyncSummary{}, nil, err
@@ -280,95 +342,144 @@ func (s *Syncer) syncOwner(ctx context.Context, owner, token string) (SyncSummar
 		if ctx.Err() != nil {
 			return sum, changedProjects, ctx.Err()
 		}
-		pushedAt := parseOptionalTime(r.PushedAt)
-		if r.IsArchived {
-			if existing, err := s.store.GetGitHubRepo(ctx, r.NameWithOwner); err == nil && !existing.IsArchived {
-				existing.IsArchived = true
-				_ = s.store.UpsertGitHubRepo(ctx, existing)
-			}
-			continue
-		}
+		syncedRepos[strings.ToLower(r.NameWithOwner)] = true
+		repoSum, projects := s.syncRepoNode(ctx, owner, r, cutoff, token, seenProj)
+		sum.ReposScanned += repoSum.ReposScanned
+		sum.ItemsUpserted += repoSum.ItemsUpserted
+		sum.ItemsChanged += repoSum.ItemsChanged
+		sum.Errors = append(sum.Errors, repoSum.Errors...)
+		changedProjects = append(changedProjects, projects...)
+	}
+	return sum, changedProjects, nil
+}
 
-		sum.ReposScanned++
-		existing, getErr := s.store.GetGitHubRepo(ctx, r.NameWithOwner)
-		if getErr != nil && !errors.Is(getErr, store.ErrNotFound) {
-			sum.Errors = append(sum.Errors, fmt.Sprintf("%s: load repo: %v", r.NameWithOwner, getErr))
-			continue
-		}
+func (s *Syncer) syncRepoNode(
+	ctx context.Context,
+	owner string,
+	r gqlRepoNode,
+	cutoff time.Time,
+	token string,
+	seenProj map[string]bool,
+) (SyncSummary, []string) {
+	var sum SyncSummary
+	var changedProjects []string
 
-		now := s.now()
-		repoRecord := store.GitHubRepo{
-			FullName:       r.NameWithOwner,
-			Owner:          owner,
-			Name:           r.Name,
-			Project:        r.Name,
-			Description:    strings.TrimSpace(r.Description),
-			IsPrivate:      r.IsPrivate,
-			IsArchived:     false,
-			HasDiscussions: r.HasDiscussionsEnabled,
-			PushedAt:       pushedAt,
-			LastSyncedAt:   &now,
+	pushedAt := parseOptionalTime(r.PushedAt)
+	if r.IsArchived {
+		if existing, err := s.store.GetGitHubRepo(ctx, r.NameWithOwner); err == nil && !existing.IsArchived {
+			existing.IsArchived = true
+			_ = s.store.UpsertGitHubRepo(ctx, existing)
 		}
-		// Ensure newly discovered repos exist in github_repos before child milestone/item foreign keys.
-		if errors.Is(getErr, store.ErrNotFound) {
-			if err := s.store.UpsertGitHubRepo(ctx, repoRecord); err != nil {
-				sum.Errors = append(sum.Errors, fmt.Sprintf("%s: upsert repo: %v", r.NameWithOwner, err))
-				continue
-			}
-		}
+		return sum, nil
+	}
 
-		// Skip GraphQL item fetches for dormant repos with zero open issues/PRs and no prior synced items.
-		dormant := r.Issues.TotalCount == 0 && r.PullRequests.TotalCount == 0 && !r.HasDiscussionsEnabled &&
-			existing.SyncHash == "" && (pushedAt == nil || pushedAt.Before(cutoff))
-		if dormant {
-			if !errors.Is(getErr, store.ErrNotFound) {
-				_ = s.store.UpsertGitHubRepo(ctx, repoRecord)
-			}
-			continue
-		}
+	sum.ReposScanned++
+	existing, getErr := s.store.GetGitHubRepo(ctx, r.NameWithOwner)
+	if getErr != nil && !errors.Is(getErr, store.ErrNotFound) {
+		sum.Errors = append(sum.Errors, fmt.Sprintf("%s: load repo: %v", r.NameWithOwner, getErr))
+		return sum, nil
+	}
 
-		milestones, items, warnErrs := s.fetchRepoData(ctx, owner, r.Name, r.NameWithOwner, r.HasDiscussionsEnabled, cutoff, token)
-		sum.Errors = append(sum.Errors, warnErrs...)
-
-		syncHash := computeRepoSyncHash(r.Description, milestones, items)
-		repoRecord.SyncHash = syncHash
+	now := s.now()
+	repoRecord := store.GitHubRepo{
+		FullName:       r.NameWithOwner,
+		Owner:          owner,
+		Name:           r.Name,
+		Project:        r.Name,
+		Description:    strings.TrimSpace(r.Description),
+		IsPrivate:      r.IsPrivate,
+		IsArchived:     false,
+		HasDiscussions: r.HasDiscussionsEnabled,
+		PushedAt:       pushedAt,
+		LastSyncedAt:   &now,
+	}
+	// Ensure newly discovered repos exist in github_repos before child milestone/item foreign keys.
+	if errors.Is(getErr, store.ErrNotFound) {
 		if err := s.store.UpsertGitHubRepo(ctx, repoRecord); err != nil {
-			sum.Errors = append(sum.Errors, fmt.Sprintf("%s: save sync hash: %v", r.NameWithOwner, err))
+			sum.Errors = append(sum.Errors, fmt.Sprintf("%s: upsert repo: %v", r.NameWithOwner, err))
+			return sum, nil
 		}
-		if !errors.Is(getErr, store.ErrNotFound) && existing.SyncHash == syncHash {
+	}
+
+	// Skip GraphQL item fetches for dormant repos with zero open issues/PRs and no prior synced items.
+	dormant := r.Issues.TotalCount == 0 && r.PullRequests.TotalCount == 0 && !r.HasDiscussionsEnabled &&
+		existing.SyncHash == "" && (pushedAt == nil || pushedAt.Before(cutoff))
+	if dormant {
+		if !errors.Is(getErr, store.ErrNotFound) {
+			_ = s.store.UpsertGitHubRepo(ctx, repoRecord)
+		}
+		return sum, nil
+	}
+
+	milestones, items, warnErrs := s.fetchRepoData(ctx, owner, r.Name, r.NameWithOwner, r.HasDiscussionsEnabled, cutoff, token)
+	sum.Errors = append(sum.Errors, warnErrs...)
+
+	syncHash := computeRepoSyncHash(r.Description, milestones, items)
+	repoRecord.SyncHash = syncHash
+	if err := s.store.UpsertGitHubRepo(ctx, repoRecord); err != nil {
+		sum.Errors = append(sum.Errors, fmt.Sprintf("%s: save sync hash: %v", r.NameWithOwner, err))
+	}
+	if !errors.Is(getErr, store.ErrNotFound) && existing.SyncHash == syncHash {
+		return sum, nil
+	}
+
+	if err := s.store.UpsertGitHubMilestones(ctx, r.NameWithOwner, milestones); err != nil {
+		sum.Errors = append(sum.Errors, fmt.Sprintf("%s: milestones: %v", r.NameWithOwner, err))
+	}
+	for i := range items {
+		sum.ItemsUpserted++
+		changed, err := s.store.UpsertGitHubItem(ctx, items[i])
+		if err != nil {
+			sum.Errors = append(sum.Errors, fmt.Sprintf("%s: upsert %s: %v", r.NameWithOwner, items[i].ID, err))
 			continue
 		}
-
-		if err := s.store.UpsertGitHubMilestones(ctx, r.NameWithOwner, milestones); err != nil {
-			sum.Errors = append(sum.Errors, fmt.Sprintf("%s: milestones: %v", r.NameWithOwner, err))
+		if changed {
+			sum.ItemsChanged++
 		}
-		for i := range items {
-			sum.ItemsUpserted++
-			changed, err := s.store.UpsertGitHubItem(ctx, items[i])
-			if err != nil {
-				sum.Errors = append(sum.Errors, fmt.Sprintf("%s: upsert %s: %v", r.NameWithOwner, items[i].ID, err))
-				continue
-			}
-			if changed {
-				sum.ItemsChanged++
-			}
-		}
+	}
 
-		if len(items) > 0 || len(milestones) > 0 {
-			projects, err := s.store.ListProjectsForRepo(ctx, r.NameWithOwner)
-			if err != nil {
-				sum.Errors = append(sum.Errors, fmt.Sprintf("%s: list projects: %v", r.NameWithOwner, err))
-				continue
-			}
-			for _, proj := range projects {
-				if !seenProj[proj] {
-					seenProj[proj] = true
-					changedProjects = append(changedProjects, proj)
-				}
+	if len(items) > 0 || len(milestones) > 0 {
+		projects, err := s.store.ListProjectsForRepo(ctx, r.NameWithOwner)
+		if err != nil {
+			sum.Errors = append(sum.Errors, fmt.Sprintf("%s: list projects: %v", r.NameWithOwner, err))
+			return sum, nil
+		}
+		for _, proj := range projects {
+			if !seenProj[proj] {
+				seenProj[proj] = true
+				changedProjects = append(changedProjects, proj)
 			}
 		}
 	}
-	return sum, changedProjects, nil
+	return sum, changedProjects
+}
+
+const getRepoQuery = `
+query($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    name
+    nameWithOwner
+    description
+    isPrivate
+    isArchived
+    hasDiscussionsEnabled
+    pushedAt
+    issues(states: [OPEN]) { totalCount }
+    pullRequests(states: [OPEN]) { totalCount }
+  }
+}`
+
+func (s *Syncer) fetchRepoMeta(ctx context.Context, owner, name, token string) (gqlRepoNode, error) {
+	var resp struct {
+		Repository *gqlRepoNode `json:"repository"`
+	}
+	if err := s.doGraphQL(ctx, token, getRepoQuery, map[string]any{"owner": owner, "name": name}, &resp); err != nil {
+		return gqlRepoNode{}, err
+	}
+	if resp.Repository == nil {
+		return gqlRepoNode{}, fmt.Errorf("repository %s/%s not found", owner, name)
+	}
+	return *resp.Repository, nil
 }
 
 const listOwnerReposQuery = `
