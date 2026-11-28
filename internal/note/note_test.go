@@ -178,6 +178,12 @@ func TestProjectSlugAndLocalPath(t *testing.T) {
 			want:    filepath.Join("/tmp/projects", "-home-valery", "memory", "gpu-reset.md"),
 		},
 		{
+			name:    "canonical project with slug-prefixed note id",
+			project: "krakozhia",
+			noteID:  "-home-valery-projects-krakozhia/gpu-reset",
+			want:    filepath.Join("/tmp/projects", "-home-valery-projects-krakozhia", "memory", "gpu-reset.md"),
+		},
+		{
 			name:    "rejects traversal",
 			project: "..",
 			noteID:  "../escape",

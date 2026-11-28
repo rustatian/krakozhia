@@ -130,6 +130,12 @@ func (w *Worker) ProcessOnce(ctx context.Context) (bool, error) {
 		runErr = w.enrichNote(ctx, job.TargetID)
 	case "distill_chat":
 		runErr = w.distillChat(ctx, job.TargetID)
+	case "embed_github_item":
+		runErr = w.embedGitHubItem(ctx, job.TargetID)
+	case "distill_org_roadmap":
+		runErr = w.distillOrgRoadmap(ctx, job.TargetID)
+	case "distill_project_roadmap":
+		runErr = w.distillProjectRoadmap(ctx, job.TargetID)
 	case "refresh_brief":
 		runErr = w.refreshBrief(ctx, job.TargetID)
 	default:
@@ -298,6 +304,191 @@ func (w *Worker) distillChat(ctx context.Context, chatID string) error {
 	return w.store.MarkChatDistilled(ctx, cs.ID, saved.ID, cs.TranscriptHash)
 }
 
+func (w *Worker) embedGitHubItem(ctx context.Context, itemID string) error {
+	item, err := w.store.GetGitHubItem(ctx, itemID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	vec, err := w.inf.EmbedDocument(ctx, buildGitHubItemEmbedText(item))
+	if err != nil {
+		return err
+	}
+	return w.store.UpdateGitHubItemEmbedding(ctx, item.ID, vec)
+}
+
+func (w *Worker) distillOrgRoadmap(ctx context.Context, owner string) error {
+	repos, err := w.store.ListGitHubReposByOwner(ctx, owner)
+	if err != nil {
+		return err
+	}
+	items, err := w.store.ListGitHubItems(ctx, store.GitHubItemFilter{Owner: owner, Limit: 160})
+	if err != nil {
+		return err
+	}
+	if len(repos) == 0 && len(items) == 0 {
+		return nil
+	}
+	var milestones []store.GitHubMilestone
+	for i, r := range repos {
+		if i >= 30 {
+			break
+		}
+		ms, err := w.store.ListGitHubMilestones(ctx, r.FullName)
+		if err != nil {
+			return err
+		}
+		milestones = append(milestones, ms...)
+	}
+
+	rawMD, err := w.inf.Chat(ctx, orgRoadmapSystemPrompt, buildOrgRoadmapPrompt(owner, repos, milestones, items), 1400)
+	if err != nil {
+		return err
+	}
+	body := stripMarkdownFence(rawMD)
+	if body == "" {
+		return errors.New("empty org roadmap response")
+	}
+
+	title := fmt.Sprintf("%s Organization Roadmap", owner)
+	var docBody strings.Builder
+	fmt.Fprintf(&docBody, "# %s\n\n", title)
+	fmt.Fprintf(&docBody, "- Owner: `%s`\n- Repositories tracked: `%d`\n- Items synthesized: `%d`\n\n", owner, len(repos), len(items))
+	docBody.WriteString(body)
+	docBody.WriteString("\n")
+
+	content, _ := secrets.Redact(docBody.String())
+	if err := w.saveRoadmapDocument(ctx, owner, "org-roadmap", title, firstSummaryLine(body, title), []string{"roadmap", "github", strings.ToLower(owner)}, content); err != nil {
+		return err
+	}
+
+	projects, err := w.store.ListProjectsForOwner(ctx, owner)
+	if err != nil {
+		return err
+	}
+	for _, proj := range projects {
+		if err := w.store.EnqueueJob(ctx, "refresh_brief", "project", proj); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (w *Worker) distillProjectRoadmap(ctx context.Context, project string) error {
+	repos, err := w.store.ListReposForProject(ctx, project)
+	if err != nil {
+		return err
+	}
+	items, err := w.store.ListGitHubItems(ctx, store.GitHubItemFilter{Project: project, Limit: 120})
+	if err != nil {
+		return err
+	}
+	if len(repos) == 0 && len(items) == 0 {
+		return nil
+	}
+	var milestones []store.GitHubMilestone
+	for _, r := range repos {
+		ms, err := w.store.ListGitHubMilestones(ctx, r.FullName)
+		if err != nil {
+			return err
+		}
+		milestones = append(milestones, ms...)
+	}
+	orgRoadmaps, err := w.loadOrgRoadmapsForProject(ctx, project)
+	if err != nil {
+		return err
+	}
+
+	rawMD, err := w.inf.Chat(ctx, projectRoadmapSystemPrompt, buildProjectRoadmapPrompt(project, repos, milestones, items, orgRoadmaps), 1200)
+	if err != nil {
+		return err
+	}
+	body := stripMarkdownFence(rawMD)
+	if body == "" {
+		return errors.New("empty project roadmap response")
+	}
+
+	title := fmt.Sprintf("%s Roadmap", project)
+	var docBody strings.Builder
+	fmt.Fprintf(&docBody, "# %s\n\n", title)
+	if len(repos) > 0 {
+		names := make([]string, len(repos))
+		for i, r := range repos {
+			names[i] = r.FullName
+		}
+		fmt.Fprintf(&docBody, "- Repositories: `%s`\n", strings.Join(names, "`, `"))
+	}
+	fmt.Fprintf(&docBody, "- Items synthesized: `%d`\n\n", len(items))
+	docBody.WriteString(body)
+	docBody.WriteString("\n")
+
+	content, _ := secrets.Redact(docBody.String())
+	tags := []string{"roadmap", "github"}
+	for _, orm := range orgRoadmaps {
+		tags = append(tags, strings.ToLower(orm.Project))
+	}
+	return w.saveRoadmapDocument(ctx, project, "roadmap", title, firstSummaryLine(body, title), normalizeTags(tags), content)
+}
+
+func (w *Worker) saveRoadmapDocument(ctx context.Context, project, name, title, summary string, tags []string, content string) error {
+	sections := chunk.Split(content, title)
+	chunkInputs := make([]store.ChunkInput, len(sections))
+	for i, sec := range sections {
+		chunkInputs[i] = store.ChunkInput{Section: sec}
+		if vec, err := w.inf.EmbedDocument(ctx, sec.EmbedText()); err == nil {
+			chunkInputs[i].Embedding = vec
+		}
+	}
+	_, err := w.store.SaveDocument(ctx, store.SaveDocumentInput{
+		Project:       project,
+		Name:          name,
+		DocType:       "roadmap",
+		Title:         title,
+		Summary:       summary,
+		Tags:          tags,
+		Content:       content,
+		SourceAgent:   "githubsync",
+		SkipEnrichDoc: true,
+		Chunks:        chunkInputs,
+	})
+	return err
+}
+
+func (w *Worker) loadOrgRoadmapsForProject(ctx context.Context, project string) ([]store.Document, error) {
+	owners, err := w.store.ListOwnersForProject(ctx, project)
+	if err != nil {
+		return nil, err
+	}
+	var out []store.Document
+	for _, owner := range owners {
+		doc, err := w.store.GetDocument(ctx, owner+"/org-roadmap", 0)
+		if errors.Is(err, store.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, doc)
+	}
+	return out, nil
+}
+
+func firstSummaryLine(md, fallback string) string {
+	for _, line := range strings.Split(md, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		trimmed = strings.TrimLeft(trimmed, "-* ")
+		if trimmed != "" {
+			return truncateRunes(trimmed, 220)
+		}
+	}
+	return fallback
+}
+
 func (w *Worker) refreshBrief(ctx context.Context, project string) error {
 	docs, err := w.store.ListDocuments(ctx, project, "", 25)
 	if err != nil {
@@ -315,11 +506,25 @@ func (w *Worker) refreshBrief(ctx context.Context, project string) error {
 	if err != nil {
 		return err
 	}
-	if len(docs) == 0 && len(notes) == 0 && len(benches) == 0 {
+	repos, err := w.store.ListReposForProject(ctx, project)
+	if err != nil {
+		return err
+	}
+	var projectRoadmap *store.Document
+	if doc, err := w.store.GetDocument(ctx, project+"/roadmap", 0); err == nil {
+		projectRoadmap = &doc
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+	orgRoadmaps, err := w.loadOrgRoadmapsForProject(ctx, project)
+	if err != nil {
+		return err
+	}
+	if len(docs) == 0 && len(notes) == 0 && len(benches) == 0 && projectRoadmap == nil && len(orgRoadmaps) == 0 {
 		return nil
 	}
 
-	sourceHash := hashBriefInputs(docs, notes, benches)
+	sourceHash := hashBriefInputs(docs, notes, benches, projectRoadmap, orgRoadmaps)
 	existing, err := w.store.GetProjectBrief(ctx, project)
 	if err == nil && existing.SourceHash == sourceHash {
 		return nil
@@ -328,7 +533,7 @@ func (w *Worker) refreshBrief(ctx context.Context, project string) error {
 		return err
 	}
 
-	briefMD, err := w.inf.Chat(ctx, briefSystemPrompt, buildBriefPrompt(project, docs, notes, benches), 768)
+	briefMD, err := w.inf.Chat(ctx, briefSystemPrompt, buildBriefPrompt(project, docs, notes, benches, repos, projectRoadmap, orgRoadmaps), 1280)
 	if err != nil {
 		return err
 	}
@@ -554,8 +759,20 @@ func normalizeTags(tags []string) []string {
 	return out
 }
 
-func hashBriefInputs(docs []store.Document, notes []store.Note, benches []store.Benchmark) string {
+func hashBriefInputs(
+	docs []store.Document,
+	notes []store.Note,
+	benches []store.Benchmark,
+	projectRoadmap *store.Document,
+	orgRoadmaps []store.Document,
+) string {
 	h := sha256.New()
+	if projectRoadmap != nil {
+		fmt.Fprintf(h, "prm:%s:%d:%s\n", projectRoadmap.ID, projectRoadmap.CurrentRevision, projectRoadmap.Summary)
+	}
+	for _, orm := range orgRoadmaps {
+		fmt.Fprintf(h, "orm:%s:%d:%s\n", orm.ID, orm.CurrentRevision, orm.Summary)
+	}
 	for _, d := range docs {
 		fmt.Fprintf(h, "d:%s:%d:%s\n", d.ID, d.CurrentRevision, d.Summary)
 	}

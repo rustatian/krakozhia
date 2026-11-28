@@ -18,12 +18,12 @@ const (
 
 const rrfK = 60.0
 
-// SearchQuery configures hybrid retrieval across document chunks and memory notes.
+// SearchQuery configures hybrid retrieval across document chunks, memory notes, and GitHub items.
 type SearchQuery struct {
 	Form               string
 	Text               string
 	QueryVector        []float32
-	Kind               string // "", "doc", or "note"
+	Kind               string // "", "doc", "note", or "github"
 	Project            string
 	ExcludeNoteProject string
 	Type               string
@@ -43,6 +43,7 @@ type SearchHit struct {
 	HeadingPath string    `json:"heading_path,omitempty"`
 	Description string    `json:"description,omitempty"`
 	Snippet     string    `json:"snippet"`
+	URL         string    `json:"url,omitempty"`
 	UpdatedAt   time.Time `json:"updated_at"`
 	Distance    *float64  `json:"distance,omitempty"`
 	TextScore   *float64  `json:"text_score,omitempty"`
@@ -159,11 +160,11 @@ func (s *Store) SearchKnowledge(ctx context.Context, q SearchQuery) ([]SearchHit
 func (s *Store) searchVector(ctx context.Context, q SearchQuery, limit int) ([]SearchHit, error) {
 	vec := pgvector.NewVector(q.QueryVector)
 	rows, err := s.pool.Query(ctx, `
-		SELECT kind, id, document_id, project, item_type, title, heading_path, description, snippet, updated_at, distance
+		SELECT kind, id, document_id, project, item_type, title, heading_path, description, snippet, url, updated_at, distance
 		FROM (
 			SELECT 'doc'::text AS kind, c.id, c.document_id, d.project, d.doc_type AS item_type,
 			       d.title, c.heading_path, d.summary AS description, c.content AS snippet,
-			       d.updated_at, (c.embedding <=> $1) AS distance
+			       ''::text AS url, d.updated_at, (c.embedding <=> $1) AS distance
 			FROM chunks c
 			JOIN documents d ON d.id = c.document_id
 			WHERE ($2 = '' OR $2 = 'doc')
@@ -174,7 +175,7 @@ func (s *Store) searchVector(ctx context.Context, q SearchQuery, limit int) ([]S
 			UNION ALL
 			SELECT 'note'::text AS kind, n.id, ''::text AS document_id, n.project, n.note_type AS item_type,
 			       n.name AS title, ''::text AS heading_path, n.description, n.content AS snippet,
-			       n.updated_at, (n.embedding <=> $1) AS distance
+			       ''::text AS url, n.updated_at, (n.embedding <=> $1) AS distance
 			FROM notes n
 			WHERE ($2 = '' OR $2 = 'note')
 			  AND ($3 = '' OR n.project = $3)
@@ -182,6 +183,21 @@ func (s *Store) searchVector(ctx context.Context, q SearchQuery, limit int) ([]S
 			  AND ($5 = '' OR n.note_type = $5)
 			  AND ($6 = '' OR $6 = ANY(n.tags))
 			  AND n.embedding IS NOT NULL
+			UNION ALL
+			SELECT 'github'::text AS kind, g.id, ''::text AS document_id, g.project, g.kind AS item_type,
+			       g.title, (g.repo_full_name || '#' || g.number || ' [' || g.state || ']') AS heading_path,
+			       g.milestone_title AS description,
+			       CASE WHEN g.body <> '' THEN g.body ELSE g.title END AS snippet,
+			       g.url, g.github_updated_at AS updated_at, (g.embedding <=> $1) AS distance
+			FROM github_items g
+			WHERE ($2 = '' OR $2 = 'github')
+			  AND ($3 = '' OR g.project = $3 OR g.owner = $3 OR EXISTS (
+					SELECT 1 FROM project_repos pr
+					WHERE pr.project = $3 AND pr.repo_full_name = g.repo_full_name
+			      ))
+			  AND ($5 = '' OR g.kind = $5)
+			  AND ($6 = '' OR $6 = ANY(g.labels))
+			  AND g.embedding IS NOT NULL
 		) AS candidates
 		ORDER BY distance ASC, id ASC
 		LIMIT $7`, vec, q.Kind, q.Project, q.ExcludeNoteProject, q.Type, q.Tag, limit)
@@ -196,7 +212,7 @@ func (s *Store) searchVector(ctx context.Context, q SearchQuery, limit int) ([]S
 		var dist float64
 		if err := rows.Scan(
 			&h.Kind, &h.ID, &h.DocumentID, &h.Project, &h.Type,
-			&h.Title, &h.HeadingPath, &h.Description, &h.Snippet, &h.UpdatedAt, &dist); err != nil {
+			&h.Title, &h.HeadingPath, &h.Description, &h.Snippet, &h.URL, &h.UpdatedAt, &dist); err != nil {
 			return nil, err
 		}
 		h.Distance = &dist
@@ -223,11 +239,11 @@ func (s *Store) searchFTS(ctx context.Context, q SearchQuery, limit int) ([]Sear
 					''::tsquery
 				) AS q_simple
 		)
-		SELECT kind, id, document_id, project, item_type, title, heading_path, description, snippet, updated_at, score
+		SELECT kind, id, document_id, project, item_type, title, heading_path, description, snippet, url, updated_at, score
 		FROM (
 			SELECT 'doc'::text AS kind, c.id, c.document_id, d.project, d.doc_type AS item_type,
 			       d.title, c.heading_path, d.summary AS description, c.content AS snippet,
-			       d.updated_at,
+			       ''::text AS url, d.updated_at,
 			       (ts_rank_cd(c.tsv_en, queries.q_en, 1 | 32) + ts_rank_cd(c.tsv_simple, queries.q_simple, 1 | 32))::double precision AS score
 			FROM chunks c
 			JOIN documents d ON d.id = c.document_id
@@ -240,7 +256,7 @@ func (s *Store) searchFTS(ctx context.Context, q SearchQuery, limit int) ([]Sear
 			UNION ALL
 			SELECT 'note'::text AS kind, n.id, ''::text AS document_id, n.project, n.note_type AS item_type,
 			       n.name AS title, ''::text AS heading_path, n.description, n.content AS snippet,
-			       n.updated_at,
+			       ''::text AS url, n.updated_at,
 			       (ts_rank_cd(n.tsv_en, queries.q_en, 1 | 32) + ts_rank_cd(n.tsv_simple, queries.q_simple, 1 | 32))::double precision AS score
 			FROM notes n
 			CROSS JOIN queries
@@ -250,6 +266,23 @@ func (s *Store) searchFTS(ctx context.Context, q SearchQuery, limit int) ([]Sear
 			  AND ($5 = '' OR n.note_type = $5)
 			  AND ($6 = '' OR $6 = ANY(n.tags))
 			  AND (n.tsv_en @@ queries.q_en OR n.tsv_simple @@ queries.q_simple)
+			UNION ALL
+			SELECT 'github'::text AS kind, g.id, ''::text AS document_id, g.project, g.kind AS item_type,
+			       g.title, (g.repo_full_name || '#' || g.number || ' [' || g.state || ']') AS heading_path,
+			       g.milestone_title AS description,
+			       CASE WHEN g.body <> '' THEN g.body ELSE g.title END AS snippet,
+			       g.url, g.github_updated_at AS updated_at,
+			       (ts_rank_cd(g.tsv_en, queries.q_en, 1 | 32) + ts_rank_cd(g.tsv_simple, queries.q_simple, 1 | 32))::double precision AS score
+			FROM github_items g
+			CROSS JOIN queries
+			WHERE ($2 = '' OR $2 = 'github')
+			  AND ($3 = '' OR g.project = $3 OR g.owner = $3 OR EXISTS (
+					SELECT 1 FROM project_repos pr
+					WHERE pr.project = $3 AND pr.repo_full_name = g.repo_full_name
+			      ))
+			  AND ($5 = '' OR g.kind = $5)
+			  AND ($6 = '' OR $6 = ANY(g.labels))
+			  AND (g.tsv_en @@ queries.q_en OR g.tsv_simple @@ queries.q_simple)
 		) AS candidates
 		ORDER BY score DESC, id ASC
 		LIMIT $7`, q.Text, q.Kind, q.Project, q.ExcludeNoteProject, q.Type, q.Tag, limit)
@@ -264,7 +297,7 @@ func (s *Store) searchFTS(ctx context.Context, q SearchQuery, limit int) ([]Sear
 		var score float64
 		if err := rows.Scan(
 			&h.Kind, &h.ID, &h.DocumentID, &h.Project, &h.Type,
-			&h.Title, &h.HeadingPath, &h.Description, &h.Snippet, &h.UpdatedAt, &score); err != nil {
+			&h.Title, &h.HeadingPath, &h.Description, &h.Snippet, &h.URL, &h.UpdatedAt, &score); err != nil {
 			return nil, err
 		}
 		h.TextScore = &score

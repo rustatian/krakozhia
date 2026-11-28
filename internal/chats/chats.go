@@ -34,6 +34,7 @@ type Session struct {
 	ExternalID     string
 	Project        string
 	WorkspacePath  string
+	RepoFullName   string
 	Title          string
 	StartedAt      time.Time
 	UpdatedAt      time.Time
@@ -136,6 +137,112 @@ func resolveGitWorktreeRoot(worktreeDir, gitFile string) string {
 		return filepath.FromSlash(before)
 	}
 	return ""
+}
+
+// ResolveGitRemote returns the normalized GitHub "owner/repo" for the workspace's origin remote, or "".
+func ResolveGitRemote(workspacePath, homeDir string) string {
+	ws := strings.TrimSpace(workspacePath)
+	if ws == "" {
+		return ""
+	}
+	if after, ok := strings.CutPrefix(ws, "file://"); ok {
+		if u, err := url.PathUnescape(after); err == nil {
+			ws = u
+		} else {
+			ws = after
+		}
+	}
+	clean := filepath.Clean(ws)
+	if clean == "." || clean == "/" {
+		return ""
+	}
+	cleanHome := ""
+	if homeDir != "" {
+		cleanHome = filepath.Clean(homeDir)
+		if clean == cleanHome {
+			return ""
+		}
+	}
+
+	cur := clean
+	for {
+		if cur == "/" || cur == "." || (cleanHome != "" && cur == cleanHome) {
+			break
+		}
+		gitPath := filepath.Join(cur, ".git")
+		if info, err := os.Stat(gitPath); err == nil {
+			configPath := filepath.Join(gitPath, "config")
+			if !info.IsDir() {
+				if mainRoot := resolveGitWorktreeRoot(cur, gitPath); mainRoot != "" {
+					configPath = filepath.Join(mainRoot, ".git", "config")
+				} else {
+					return ""
+				}
+			}
+			return ParseGitHubRemoteURL(readOriginURL(configPath))
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			break
+		}
+		cur = parent
+	}
+	return ""
+}
+
+func readOriginURL(configPath string) string {
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		return ""
+	}
+	inOrigin := false
+	for _, line := range strings.Split(string(raw), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, ";") {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			inOrigin = trimmed == `[remote "origin"]`
+			continue
+		}
+		if !inOrigin {
+			continue
+		}
+		key, val, ok := strings.Cut(trimmed, "=")
+		if ok && strings.EqualFold(strings.TrimSpace(key), "url") {
+			return strings.TrimSpace(val)
+		}
+	}
+	return ""
+}
+
+// ParseGitHubRemoteURL normalizes a GitHub SSH or HTTPS remote URL into "owner/repo", or "".
+func ParseGitHubRemoteURL(rawURL string) string {
+	raw := strings.TrimSpace(rawURL)
+	if raw == "" {
+		return ""
+	}
+	var path string
+	switch {
+	case strings.HasPrefix(raw, "git@github.com:"):
+		path = strings.TrimPrefix(raw, "git@github.com:")
+	case strings.Contains(raw, "://"):
+		u, err := url.Parse(raw)
+		if err != nil || !strings.EqualFold(u.Hostname(), "github.com") {
+			return ""
+		}
+		path = u.Path
+	default:
+		return ""
+	}
+	path = strings.TrimPrefix(path, "/")
+	path = strings.TrimSuffix(path, "/")
+	path = strings.TrimSuffix(path, ".git")
+	parts := strings.Split(path, "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return ""
+	}
+	return parts[0] + "/" + parts[1]
 }
 
 func sanitizeProjectName(name string) string {

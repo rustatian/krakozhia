@@ -16,10 +16,16 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/rustatian/krakozhia/internal/chunk"
+	"github.com/rustatian/krakozhia/internal/githubsync"
 	"github.com/rustatian/krakozhia/internal/inference"
 	"github.com/rustatian/krakozhia/internal/secrets"
 	"github.com/rustatian/krakozhia/internal/store"
 )
+
+// GitHubSyncer runs on-demand synchronization of allowlisted GitHub owners.
+type GitHubSyncer interface {
+	SyncAll(ctx context.Context) (githubsync.SyncSummary, error)
+}
 
 // InferenceClient abstracts embedding, chat, reranking, and health checks.
 type InferenceClient interface {
@@ -32,17 +38,19 @@ type InferenceClient interface {
 
 // Config configures a krakozhia Server.
 type Config struct {
-	Store     *store.Store
-	Inference InferenceClient
-	Token     string
-	Version   string
-	WebUI     http.Handler
+	Store        *store.Store
+	Inference    InferenceClient
+	GitHubSyncer GitHubSyncer
+	Token        string
+	Version      string
+	WebUI        http.Handler
 }
 
 // Server serves REST, MCP, and optional read-only UI endpoints.
 type Server struct {
 	store     *store.Store
 	inf       InferenceClient
+	ghSyncer  GitHubSyncer
 	token     string
 	version   string
 	webUI     http.Handler
@@ -63,12 +71,13 @@ func New(cfg Config) *Server {
 		ver = "dev"
 	}
 	s := &Server{
-		store:   cfg.Store,
-		inf:     cfg.Inference,
-		token:   cfg.Token,
-		version: ver,
-		webUI:   cfg.WebUI,
-		metrics: newMetricsRegistry(),
+		store:    cfg.Store,
+		inf:      cfg.Inference,
+		ghSyncer: cfg.GitHubSyncer,
+		token:    cfg.Token,
+		version:  ver,
+		webUI:    cfg.WebUI,
+		metrics:  newMetricsRegistry(),
 	}
 	s.mcpServer = s.newMCPServer()
 	return s
@@ -98,6 +107,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/notes/get", s.wrapRoute("GET /api/v1/notes/get", s.requireAuthFunc(s.handleGetNote)))
 	mux.Handle("GET /api/v1/chats/hashes", s.wrapRoute("GET /api/v1/chats/hashes", s.requireAuthFunc(s.handleListChatHashes)))
 	mux.Handle("POST /api/v1/chats/ingest", s.wrapRoute("POST /api/v1/chats/ingest", s.requireAuthFunc(s.handleIngestChats)))
+	mux.Handle("POST /api/v1/github/sync", s.wrapRoute("POST /api/v1/github/sync", s.requireAuthFunc(s.handleSyncGitHub)))
 	mux.Handle("POST /api/v1/benchmarks", s.wrapRoute("POST /api/v1/benchmarks", s.requireAuthFunc(s.handleRecordBenchmark)))
 	mux.Handle("GET /api/v1/benchmarks", s.wrapRoute("GET /api/v1/benchmarks", s.requireAuthFunc(s.handleQueryBenchmarks)))
 	mux.Handle("GET /api/v1/benchmarks/compare", s.wrapRoute("GET /api/v1/benchmarks/compare", s.requireAuthFunc(s.handleCompareBenchmarks)))
@@ -532,7 +542,8 @@ func (s *Server) handleGetNote(w http.ResponseWriter, r *http.Request) {
 
 // IngestChatsRequest submits a batch of redacted chat excerpts for async distillation.
 type IngestChatsRequest struct {
-	Chats []store.IngestChatInput `json:"chats"`
+	Chats        []store.IngestChatInput  `json:"chats"`
+	ProjectRepos []store.ProjectRepoInput `json:"project_repos,omitempty"`
 }
 
 // IngestChatsResponse reports batch chat ingestion counts.
@@ -558,6 +569,11 @@ func (s *Server) handleIngestChats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var res IngestChatsResponse
+	for _, mapping := range req.ProjectRepos {
+		if err := s.store.UpsertProjectRepo(r.Context(), mapping.Project, mapping.RepoFullName); err != nil {
+			res.Errors = append(res.Errors, fmt.Sprintf("repo %s->%s: %v", mapping.Project, mapping.RepoFullName, err))
+		}
+	}
 	for _, ch := range req.Chats {
 		queued, err := s.store.UpsertChatSession(r.Context(), ch)
 		if err != nil {
@@ -575,6 +591,19 @@ func (s *Server) handleIngestChats(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *Server) handleSyncGitHub(w http.ResponseWriter, r *http.Request) {
+	if s.ghSyncer == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "github sync is not configured"})
+		return
+	}
+	sum, err := s.ghSyncer.SyncAll(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, sum)
 }
 
 func (s *Server) handleRecordBenchmark(w http.ResponseWriter, r *http.Request) {

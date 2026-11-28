@@ -27,6 +27,8 @@ type Reader interface {
 	QueryBenchmarks(ctx context.Context, filter store.BenchmarkFilter) ([]store.Benchmark, error)
 	GetProjectBrief(ctx context.Context, project string) (store.ProjectBrief, error)
 	ListRecordLinks(ctx context.Context, targetKind, targetID string) ([]store.RecordLink, error)
+	ListReposForProject(ctx context.Context, project string) ([]store.GitHubRepo, error)
+	ListGitHubItems(ctx context.Context, filter store.GitHubItemFilter) ([]store.GitHubItem, error)
 }
 
 // SearchParams configures a UI search query.
@@ -76,6 +78,7 @@ func New(reader Reader, search SearchFunc) http.Handler {
 		tmpl:   tmpl,
 	}
 	u.mux.HandleFunc("GET /{$}", u.handleHome)
+	u.mux.HandleFunc("GET /roadmaps", u.handleRoadmaps)
 	u.mux.HandleFunc("GET /documents", u.handleDocuments)
 	u.mux.HandleFunc("GET /notes", u.handleNotes)
 	u.mux.HandleFunc("GET /search", u.handleSearch)
@@ -123,6 +126,18 @@ func (u *UI) handleHome(w http.ResponseWriter, r *http.Request) {
 		"Projects":  projects,
 		"Documents": docs,
 		"Notes":     notes,
+	})
+}
+
+func (u *UI) handleRoadmaps(w http.ResponseWriter, r *http.Request) {
+	docs, err := u.reader.ListDocuments(r.Context(), "", "roadmap", 100)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	u.render(w, "roadmaps", map[string]any{
+		"Title":    "Roadmaps and Directions - krakozhia",
+		"Roadmaps": docs,
 	})
 }
 
@@ -218,17 +233,29 @@ func (u *UI) handleProject(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if brief == nil && len(docs) == 0 && len(notes) == 0 && len(benches) == 0 {
+	repos, err := u.reader.ListReposForProject(ctx, project)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	ghItems, err := u.reader.ListGitHubItems(ctx, store.GitHubItemFilter{Project: project, State: "open", Limit: 30})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if brief == nil && len(docs) == 0 && len(notes) == 0 && len(benches) == 0 && len(repos) == 0 && len(ghItems) == 0 {
 		http.NotFound(w, r)
 		return
 	}
 	u.render(w, "project", map[string]any{
-		"Title":      project + " - krakozhia",
-		"Project":    project,
-		"Brief":      brief,
-		"Documents":  docs,
-		"Notes":      notes,
-		"Benchmarks": benches,
+		"Title":       project + " - krakozhia",
+		"Project":     project,
+		"Brief":       brief,
+		"Documents":   docs,
+		"Notes":       notes,
+		"Benchmarks":  benches,
+		"GitHubRepos": repos,
+		"GitHubItems": ghItems,
 	})
 }
 
@@ -349,11 +376,12 @@ const uiTemplates = `
   <a href="/">krakozhia</a>
   <nav>
     <a href="/">Overview</a>
+    <a href="/roadmaps">Roadmaps</a>
     <a href="/documents">Documents</a>
     <a href="/notes">Notes</a>
   </nav>
   <form class="search" action="/search" method="get">
-    <input type="search" name="q" placeholder="Search chats, docs, and notes..." required>
+    <input type="search" name="q" placeholder="Search chats, docs, notes, and tickets..." required>
     <button type="submit">Search</button>
   </form>
 </header>
@@ -366,6 +394,7 @@ const uiTemplates = `
   <div class="stat"><strong>{{len .Projects}}</strong> projects</div>
   <div class="stat"><strong>{{.Stats.Documents}}</strong> documents &amp; chats</div>
   <div class="stat"><strong>{{.Stats.Notes}}</strong> notes</div>
+  {{if .Stats.GitHubItems}}<div class="stat"><strong>{{.Stats.GitHubItems}}</strong> GitHub items</div>{{end}}
   <div class="stat">jobs pending: <strong>{{index .Stats.JobsByStatus "pending"}}</strong></div>
 </div>
 
@@ -411,6 +440,28 @@ const uiTemplates = `
   </tbody>
 </table>
 {{else}}<p class="muted">No notes synced yet.</p>{{end}}
+{{template "foot" .}}
+{{end}}
+
+{{define "roadmaps"}}
+{{template "head" .}}
+<h1>Roadmaps and Directions</h1>
+{{if .Roadmaps}}
+<table>
+  <thead><tr><th>ID</th><th>Project / Org</th><th>Title</th><th>Summary</th><th>Updated</th></tr></thead>
+  <tbody>
+  {{range .Roadmaps}}
+    <tr>
+      <td><a href="/document?id={{urlEscape .ID}}">{{.ID}}</a></td>
+      <td><a href="/projects/{{pathEscape .Project}}">{{.Project}}</a></td>
+      <td>{{.Title}}</td>
+      <td class="muted">{{.Summary}}</td>
+      <td>{{fmtDate .UpdatedAt}}</td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+{{else}}<p class="muted">No roadmaps synthesized yet.</p>{{end}}
 {{template "foot" .}}
 {{end}}
 
@@ -484,6 +535,7 @@ const uiTemplates = `
       <td>{{.Kind}}</td>
       <td>
         {{if eq .Kind "doc"}}<a href="/document?id={{urlEscape .DocumentID}}">{{.ID}}</a>
+        {{else if eq .Kind "github"}}{{if .URL}}<a href="{{.URL}}" target="_blank" rel="noopener noreferrer">{{.ID}}</a>{{else}}{{.ID}}{{end}}
         {{else}}<a href="/note?id={{urlEscape .ID}}">{{.ID}}</a>{{end}}
       </td>
       <td>{{.Title}}{{if .HeadingPath}} <span class="muted">({{.HeadingPath}})</span>{{end}}</td>
@@ -502,6 +554,32 @@ const uiTemplates = `
 {{if .Brief}}
 <h2>Project Brief <span class="muted">(updated {{fmtDate .Brief.UpdatedAt}})</span></h2>
 <pre>{{.Brief.BriefMD}}</pre>
+{{end}}
+
+{{if .GitHubRepos}}
+<h2>Linked GitHub Repositories</h2>
+<ul>
+{{range .GitHubRepos}}<li><code>{{.FullName}}</code>{{if .Description}} - <span class="muted">{{.Description}}</span>{{end}}</li>{{end}}
+</ul>
+{{end}}
+
+{{if .GitHubItems}}
+<h2>Open GitHub Issues, PRs, and Discussions</h2>
+<table>
+  <thead><tr><th>Ref</th><th>Kind</th><th>Title</th><th>Milestone</th><th>Sub-issues</th><th>Updated</th></tr></thead>
+  <tbody>
+  {{range .GitHubItems}}
+    <tr>
+      <td>{{if .URL}}<a href="{{.URL}}" target="_blank" rel="noopener noreferrer">{{.RepoFullName}}#{{.Number}}</a>{{else}}{{.RepoFullName}}#{{.Number}}{{end}}</td>
+      <td>{{.Kind}} ({{.State}})</td>
+      <td>{{.Title}}</td>
+      <td class="muted">{{.MilestoneTitle}}</td>
+      <td class="muted">{{if .SubIssuesTotal}}{{.SubIssuesCompleted}}/{{.SubIssuesTotal}}{{else}}-{{end}}</td>
+      <td>{{fmtDate .GitHubUpdatedAt}}</td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
 {{end}}
 
 <h2>Documents</h2>

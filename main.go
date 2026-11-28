@@ -16,6 +16,7 @@ import (
 
 	"github.com/rustatian/krakozhia/internal/cli"
 	"github.com/rustatian/krakozhia/internal/enrich"
+	"github.com/rustatian/krakozhia/internal/githubsync"
 	"github.com/rustatian/krakozhia/internal/inference"
 	"github.com/rustatian/krakozhia/internal/server"
 	"github.com/rustatian/krakozhia/internal/store"
@@ -38,7 +39,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: krakozhia <serve|recall|search|sync|sync-chats|save|show|list|bench|brief|eval>")
+		return errors.New("usage: krakozhia <serve|recall|search|sync|sync-chats|sync-github|save|show|list|bench|brief|eval>")
 	}
 	if args[0] == "serve" {
 		return runServe()
@@ -80,6 +81,39 @@ func runServe() error {
 		Timeout:     30 * time.Second,
 	})
 
+	var ghSyncer *githubsync.Syncer
+	if owners := githubsync.ParseOwners(os.Getenv("KRAKOZHIA_GITHUB_OWNERS")); len(owners) > 0 {
+		ghToken := os.Getenv("KRAKOZHIA_GITHUB_TOKEN")
+		ghTokens := githubsync.ParseOwnerTokens(os.Getenv("KRAKOZHIA_GITHUB_TOKENS"))
+		if ghToken != "" || len(ghTokens) > 0 {
+			syncInterval := 2 * time.Hour
+			if raw := os.Getenv("KRAKOZHIA_GITHUB_SYNC_INTERVAL"); raw != "" {
+				d, err := time.ParseDuration(raw)
+				if err != nil || d <= 0 {
+					return fmt.Errorf("invalid KRAKOZHIA_GITHUB_SYNC_INTERVAL %q", raw)
+				}
+				syncInterval = d
+			}
+			closedLookback := 90 * 24 * time.Hour
+			if raw := os.Getenv("KRAKOZHIA_GITHUB_CLOSED_LOOKBACK_DAYS"); raw != "" {
+				days, err := strconv.Atoi(raw)
+				if err != nil || days <= 0 {
+					return fmt.Errorf("invalid KRAKOZHIA_GITHUB_CLOSED_LOOKBACK_DAYS %q", raw)
+				}
+				closedLookback = time.Duration(days) * 24 * time.Hour
+			}
+			ghSyncer = githubsync.New(githubsync.Config{
+				Store:          st,
+				Owners:         owners,
+				DefaultToken:   ghToken,
+				OwnerTokens:    ghTokens,
+				SyncInterval:   syncInterval,
+				ClosedLookback: closedLookback,
+				Logger:         slog.Default(),
+			})
+		}
+	}
+
 	// Wire read-only HTML UI using srv.Search so browser views stay consistent with API search.
 	var srv *server.Server
 	ui := webui.New(st, func(ctx context.Context, params webui.SearchParams) ([]store.SearchHit, bool, error) {
@@ -93,13 +127,17 @@ func runServe() error {
 		})
 		return res.Hits, res.Degraded, err
 	})
-	srv = server.New(server.Config{
+	srvCfg := server.Config{
 		Store:     st,
 		Inference: inf,
 		Token:     token,
 		Version:   "0.1.0",
 		WebUI:     ui,
-	})
+	}
+	if ghSyncer != nil {
+		srvCfg.GitHubSyncer = ghSyncer
+	}
+	srv = server.New(srvCfg)
 
 	workers := 1
 	if raw := os.Getenv("KRAKOZHIA_ENRICH_WORKERS"); raw != "" {
@@ -121,6 +159,13 @@ func runServe() error {
 		go func() {
 			defer wg.Done()
 			w.Run(ctx)
+		}()
+	}
+	if ghSyncer != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ghSyncer.Run(ctx)
 		}()
 	}
 

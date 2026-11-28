@@ -11,10 +11,10 @@ import (
 
 type mcpSearchInput struct {
 	Query      string `json:"query" jsonschema:"Search query text"`
-	Kind       string `json:"kind,omitempty" jsonschema:"Filter by record kind: doc or note"`
-	Project    string `json:"project,omitempty" jsonschema:"Filter to one project name"`
-	Type       string `json:"type,omitempty" jsonschema:"Filter by document or note type"`
-	Tag        string `json:"tag,omitempty" jsonschema:"Filter by derived tag"`
+	Kind       string `json:"kind,omitempty" jsonschema:"Filter by record kind: doc, note, or github"`
+	Project    string `json:"project,omitempty" jsonschema:"Filter to one project or GitHub owner name"`
+	Type       string `json:"type,omitempty" jsonschema:"Filter by document, note, or GitHub item type (issue, pr, discussion)"`
+	Tag        string `json:"tag,omitempty" jsonschema:"Filter by derived tag or GitHub label"`
 	Limit      int    `json:"limit,omitempty" jsonschema:"Maximum results to return (default 10)"`
 	DedupeDocs bool   `json:"dedupe_docs,omitempty" jsonschema:"Keep only the highest-ranked chunk per document"`
 	Rerank     bool   `json:"rerank,omitempty" jsonschema:"Rerank top results with the cross-encoder"`
@@ -27,7 +27,7 @@ type mcpGetDocInput struct {
 
 type mcpListDocsInput struct {
 	Project string `json:"project,omitempty" jsonschema:"Optional project filter"`
-	DocType string `json:"doc_type,omitempty" jsonschema:"Optional document type filter (spec, plan, report)"`
+	DocType string `json:"doc_type,omitempty" jsonschema:"Optional document type filter (roadmap, chat, spec, plan, report)"`
 	Limit   int    `json:"limit,omitempty" jsonschema:"Maximum documents to list (default 50)"`
 }
 
@@ -94,7 +94,7 @@ func (s *Server) newMCPServer() *mcp.Server {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "search_knowledge",
-		Description: "Hybrid vector and full-text search across project documents and memory notes.",
+		Description: "Hybrid vector and full-text search across project documents, distilled chats, roadmaps, memory notes, and synced GitHub issues, pull requests, and discussions.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mcpSearchInput) (*mcp.CallToolResult, SearchResponse, error) {
 		res, err := s.searchKnowledge(ctx, SearchRequest{
 			Form:       store.FormHybrid,
@@ -214,7 +214,7 @@ func (s *Server) newMCPServer() *mcp.Server {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "get_project_brief",
-		Description: "Fetch the auto-maintained Markdown brief for a project.",
+		Description: "Fetch the auto-maintained Markdown brief for a project, including architecture, planned GitHub roadmap and future extension points, recent chat outcomes, and memory notes.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mcpGetBriefInput) (*mcp.CallToolResult, store.ProjectBrief, error) {
 		if strings.TrimSpace(in.Project) == "" {
 			return nil, store.ProjectBrief{}, badRequestError{msg: "project is required"}

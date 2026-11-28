@@ -862,6 +862,8 @@ type StoreStats struct {
 	Chunks       int64
 	Notes        int64
 	Benchmarks   int64
+	GitHubRepos  int64
+	GitHubItems  int64
 	JobsByStatus map[string]int64
 }
 
@@ -880,8 +882,11 @@ func (s *Store) Stats(ctx context.Context) (StoreStats, error) {
 			(SELECT count(*) FROM documents),
 			(SELECT count(*) FROM chunks),
 			(SELECT count(*) FROM notes),
-			(SELECT count(*) FROM benchmarks)`).Scan(
-		&stats.Documents, &stats.Chunks, &stats.Notes, &stats.Benchmarks)
+			(SELECT count(*) FROM benchmarks),
+			(SELECT count(*) FROM github_repos WHERE NOT is_archived),
+			(SELECT count(*) FROM github_items)`).Scan(
+		&stats.Documents, &stats.Chunks, &stats.Notes, &stats.Benchmarks,
+		&stats.GitHubRepos, &stats.GitHubItems)
 	if err != nil {
 		return stats, err
 	}

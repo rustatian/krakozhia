@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rustatian/krakozhia/internal/githubsync"
 	"github.com/rustatian/krakozhia/internal/server"
 	"github.com/rustatian/krakozhia/internal/store"
 )
@@ -170,6 +171,13 @@ func (c *Client) ListChatHashes(ctx context.Context) (map[string]string, error) 
 func (c *Client) IngestChats(ctx context.Context, req server.IngestChatsRequest) (server.IngestChatsResponse, error) {
 	var out server.IngestChatsResponse
 	err := c.doJSON(ctx, http.MethodPost, "/api/v1/chats/ingest", req, &out)
+	return out, err
+}
+
+// SyncGitHub calls POST /api/v1/github/sync.
+func (c *Client) SyncGitHub(ctx context.Context) (githubsync.SyncSummary, error) {
+	var out githubsync.SyncSummary
+	err := c.doJSON(ctx, http.MethodPost, "/api/v1/github/sync", nil, &out)
 	return out, err
 }
 
