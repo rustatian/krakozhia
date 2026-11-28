@@ -59,6 +59,80 @@ func TestResolveProject(t *testing.T) {
 	}
 }
 
+func TestParseGitHubRemoteURL(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{name: "ssh scp syntax", url: "git@github.com:rapira-rs/rapira.git", want: "rapira-rs/rapira"},
+		{name: "https with .git", url: "https://github.com/rustatian/krakozhia.git", want: "rustatian/krakozhia"},
+		{name: "https without .git", url: "https://github.com/roadrunner-server/roadrunner", want: "roadrunner-server/roadrunner"},
+		{name: "ssh scheme syntax", url: "ssh://git@github.com/roadrunner-server/redis.git", want: "roadrunner-server/redis"},
+		{name: "https with embedded credentials stripped", url: "https://user:secret@github.com/rapira-rs/contract.git", want: "rapira-rs/contract"},
+		{name: "dot github repo", url: "git@github.com:rapira-rs/.github.git", want: "rapira-rs/.github"},
+		{name: "non-github host ignored", url: "git@gitlab.com:group/project.git", want: ""},
+		{name: "empty url ignored", url: "", want: ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := chats.ParseGitHubRemoteURL(tc.url); got != tc.want {
+				t.Fatalf("ParseGitHubRemoteURL(%q) = %q, want %q", tc.url, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestResolveGitRemote(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	repo := filepath.Join(home, "projects", "core")
+	sub := filepath.Join(repo, "src", "runtime")
+	if err := os.MkdirAll(filepath.Join(repo, ".git", "worktrees", "wt-core"), 0o755); err != nil {
+		t.Fatalf("mkdir .git: %v", err)
+	}
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatalf("mkdir sub: %v", err)
+	}
+	gitCfg := "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = git@github.com:rapira-rs/rapira.git\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n"
+	if err := os.WriteFile(filepath.Join(repo, ".git", "config"), []byte(gitCfg), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	wt := filepath.Join(t.TempDir(), "wt-core")
+	if err := os.MkdirAll(wt, 0o755); err != nil {
+		t.Fatalf("mkdir wt: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, ".git"), []byte("gitdir: "+filepath.Join(repo, ".git", "worktrees", "wt-core")+"\n"), 0o600); err != nil {
+		t.Fatalf("write wt .git: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		ws   string
+		want string
+	}{
+		{name: "repo root reads origin remote", ws: repo, want: "rapira-rs/rapira"},
+		{name: "nested subdir resolves repo origin", ws: sub, want: "rapira-rs/rapira"},
+		{name: "worktree follows main repo config", ws: wt, want: "rapira-rs/rapira"},
+		{name: "file uri handled", ws: "file://" + repo, want: "rapira-rs/rapira"},
+		{name: "home dir returns empty", ws: home, want: ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := chats.ResolveGitRemote(tc.ws, home); got != tc.want {
+				t.Fatalf("ResolveGitRemote(%q) = %q, want %q", tc.ws, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestFormatTurnsRedactsAndTrims(t *testing.T) {
 	t.Parallel()
 

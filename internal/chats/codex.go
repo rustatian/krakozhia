@@ -159,6 +159,7 @@ func parseCodexFile(path string, mtime time.Time, homeDir string) (Session, bool
 		ExternalID:     sessionID,
 		Project:        ResolveProject(cwd, homeDir),
 		WorkspacePath:  cwd,
+		RepoFullName:   ResolveGitRemote(cwd, homeDir),
 		Title:          deriveTitle("", turns),
 		StartedAt:      started,
 		UpdatedAt:      updated,

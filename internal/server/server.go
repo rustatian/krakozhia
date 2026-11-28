@@ -532,7 +532,8 @@ func (s *Server) handleGetNote(w http.ResponseWriter, r *http.Request) {
 
 // IngestChatsRequest submits a batch of redacted chat excerpts for async distillation.
 type IngestChatsRequest struct {
-	Chats []store.IngestChatInput `json:"chats"`
+	Chats        []store.IngestChatInput  `json:"chats"`
+	ProjectRepos []store.ProjectRepoInput `json:"project_repos,omitempty"`
 }
 
 // IngestChatsResponse reports batch chat ingestion counts.
@@ -558,6 +559,11 @@ func (s *Server) handleIngestChats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var res IngestChatsResponse
+	for _, mapping := range req.ProjectRepos {
+		if err := s.store.UpsertProjectRepo(r.Context(), mapping.Project, mapping.RepoFullName); err != nil {
+			res.Errors = append(res.Errors, fmt.Sprintf("repo %s->%s: %v", mapping.Project, mapping.RepoFullName, err))
+		}
+	}
 	for _, ch := range req.Chats {
 		queued, err := s.store.UpsertChatSession(r.Context(), ch)
 		if err != nil {

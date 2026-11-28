@@ -136,6 +136,7 @@ func parseClaudeFile(path string, mtime time.Time, homeDir string) (Session, boo
 		ExternalID:     sessionID,
 		Project:        project,
 		WorkspacePath:  cwd,
+		RepoFullName:   ResolveGitRemote(cwd, homeDir),
 		Title:          deriveTitle(title, turns),
 		StartedAt:      started,
 		UpdatedAt:      updated,

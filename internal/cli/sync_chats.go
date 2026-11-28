@@ -122,8 +122,23 @@ func runSyncChats(args []string, stdout, stderr io.Writer) error {
 	}
 
 	var pending []store.IngestChatInput
+	seenRepos := map[string]bool{}
+	var projectRepos []store.ProjectRepoInput
 	for _, s := range discovered {
+		if s.RepoFullName != "" {
+			key := s.Project + "|" + s.RepoFullName
+			if !seenRepos[key] {
+				seenRepos[key] = true
+				projectRepos = append(projectRepos, store.ProjectRepoInput{
+					Project:      s.Project,
+					RepoFullName: s.RepoFullName,
+				})
+			}
+		}
 		if serverHashes[s.ID] == s.TranscriptHash {
+			continue
+		}
+		if *limit > 0 && len(pending) >= *limit {
 			continue
 		}
 		started := s.StartedAt
@@ -134,18 +149,21 @@ func runSyncChats(args []string, stdout, stderr io.Writer) error {
 			ExternalID:     s.ExternalID,
 			Project:        s.Project,
 			WorkspacePath:  s.WorkspacePath,
+			RepoFullName:   s.RepoFullName,
 			Title:          s.Title,
 			TranscriptHash: s.TranscriptHash,
 			RawExcerpt:     s.RawExcerpt,
 			StartedAt:      &started,
 			UpdatedAt:      &updated,
 		})
-		if *limit > 0 && len(pending) >= *limit {
-			break
-		}
 	}
 
 	if len(pending) == 0 {
+		if len(projectRepos) > 0 {
+			if _, err := client.IngestChats(ctx, server.IngestChatsRequest{ProjectRepos: projectRepos}); err != nil {
+				return err
+			}
+		}
 		fmt.Fprintf(stdout, "sync-chats: up to date (%d sessions scanned)\n", len(discovered))
 		return nil
 	}
@@ -155,9 +173,13 @@ func runSyncChats(args []string, stdout, stderr io.Writer) error {
 	totalErrors := 0
 	for i := 0; i < len(pending); i += chatIngestBatchSize {
 		end := min(i+chatIngestBatchSize, len(pending))
-		res, err := client.IngestChats(ctx, server.IngestChatsRequest{
+		req := server.IngestChatsRequest{
 			Chats: pending[i:end],
-		})
+		}
+		if i == 0 && len(projectRepos) > 0 {
+			req.ProjectRepos = projectRepos
+		}
+		res, err := client.IngestChats(ctx, req)
 		if err != nil {
 			return err
 		}

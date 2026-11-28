@@ -96,6 +96,7 @@ func ScanOpenCode(opencodeDir, homeDir string, opts ScanOptions) ([]Session, err
 			ExternalID:     c.id,
 			Project:        ResolveProject(c.dir, homeDir),
 			WorkspacePath:  c.dir,
+			RepoFullName:   ResolveGitRemote(c.dir, homeDir),
 			Title:          deriveTitle(c.title, turns),
 			StartedAt:      c.createdAt,
 			UpdatedAt:      c.updatedAt,

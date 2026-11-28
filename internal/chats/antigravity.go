@@ -93,6 +93,7 @@ func ScanAntigravity(agyDir, homeDir string, opts ScanOptions) ([]Session, error
 			ExternalID:     convID,
 			Project:        ResolveProject(wsPath, homeDir),
 			WorkspacePath:  wsPath,
+			RepoFullName:   ResolveGitRemote(wsPath, homeDir),
 			Title:          deriveTitle(title, turns),
 			StartedAt:      started,
 			UpdatedAt:      updated,

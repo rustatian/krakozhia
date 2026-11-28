@@ -32,6 +32,7 @@ type IngestChatInput struct {
 	ExternalID     string     `json:"external_id"`
 	Project        string     `json:"project"`
 	WorkspacePath  string     `json:"workspace_path,omitempty"`
+	RepoFullName   string     `json:"repo_full_name,omitempty"`
 	Title          string     `json:"title,omitempty"`
 	TranscriptHash string     `json:"transcript_hash,omitempty"`
 	RawExcerpt     string     `json:"raw_excerpt"`
@@ -85,6 +86,9 @@ func (s *Store) UpsertChatSession(ctx context.Context, in IngestChatInput) (bool
 		return false, err
 	}
 	if err == nil && prevHash == hash && (prevDistilled == hash || prevExcerpt != "") {
+		if err := upsertProjectRepoTx(ctx, tx, project, in.RepoFullName); err != nil {
+			return false, err
+		}
 		if err := tx.Commit(ctx); err != nil {
 			return false, err
 		}
@@ -104,6 +108,9 @@ func (s *Store) UpsertChatSession(ctx context.Context, in IngestChatInput) (bool
 			raw_excerpt = EXCLUDED.raw_excerpt,
 			updated_at = EXCLUDED.updated_at`,
 		id, agent, extID, project, in.WorkspacePath, in.Title, hash, in.RawExcerpt, startedAt, updatedAt); err != nil {
+		return false, err
+	}
+	if err := upsertProjectRepoTx(ctx, tx, project, in.RepoFullName); err != nil {
 		return false, err
 	}
 	if err := enqueueJobTx(ctx, tx, "distill_chat", "chat", id); err != nil {
