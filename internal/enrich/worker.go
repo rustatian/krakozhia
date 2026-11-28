@@ -342,18 +342,24 @@ func (w *Worker) refreshBrief(ctx context.Context, project string) error {
 // ParseDocMeta parses and validates JSON document enrichment output.
 func ParseDocMeta(raw string, validTargetIDs map[string]bool, selfID string) (DocMeta, error) {
 	cleaned := stripJSONFence(raw)
-	var meta DocMeta
-	if err := json.Unmarshal([]byte(cleaned), &meta); err != nil {
+	var wire struct {
+		Summary            string          `json:"summary"`
+		Tags               json.RawMessage `json:"tags"`
+		PossibleSupersedes []SupersedeHint `json:"possible_supersedes"`
+	}
+	if err := json.Unmarshal([]byte(cleaned), &wire); err != nil {
 		return DocMeta{}, fmt.Errorf("parse doc meta: %w", err)
 	}
-	meta.Summary = strings.TrimSpace(meta.Summary)
+	meta := DocMeta{
+		Summary: strings.TrimSpace(wire.Summary),
+		Tags:    parseFlexibleTags(wire.Tags),
+	}
 	if meta.Summary == "" {
 		return DocMeta{}, errors.New("doc summary is empty")
 	}
-	meta.Tags = normalizeTags(meta.Tags)
 
 	var filtered []SupersedeHint
-	for _, s := range meta.PossibleSupersedes {
+	for _, s := range wire.PossibleSupersedes {
 		id := strings.TrimSpace(s.ID)
 		if id == "" || id == selfID || !validTargetIDs[id] {
 			continue
@@ -367,15 +373,20 @@ func ParseDocMeta(raw string, validTargetIDs map[string]bool, selfID string) (Do
 // ParseNoteMeta parses and validates JSON note enrichment output.
 func ParseNoteMeta(raw string) (NoteMeta, error) {
 	cleaned := stripJSONFence(raw)
-	var meta NoteMeta
-	if err := json.Unmarshal([]byte(cleaned), &meta); err != nil {
+	var wire struct {
+		Summary string          `json:"summary"`
+		Tags    json.RawMessage `json:"tags"`
+	}
+	if err := json.Unmarshal([]byte(cleaned), &wire); err != nil {
 		return NoteMeta{}, fmt.Errorf("parse note meta: %w", err)
 	}
-	meta.Summary = strings.TrimSpace(meta.Summary)
+	meta := NoteMeta{
+		Summary: strings.TrimSpace(wire.Summary),
+		Tags:    parseFlexibleTags(wire.Tags),
+	}
 	if meta.Summary == "" {
 		return NoteMeta{}, errors.New("note summary is empty")
 	}
-	meta.Tags = normalizeTags(meta.Tags)
 	return meta, nil
 }
 
@@ -385,25 +396,41 @@ func ParseChatDistill(raw, fallbackTitle string) (ChatDistill, error) {
 	if cleaned == "" {
 		return ChatDistill{}, errors.New("empty chat distillation response")
 	}
-	var d ChatDistill
-	if err := json.Unmarshal([]byte(cleaned), &d); err == nil && strings.TrimSpace(d.Markdown) != "" {
-		d.Title = strings.TrimSpace(d.Title)
-		if d.Title == "" {
-			d.Title = strings.TrimSpace(fallbackTitle)
+	if strings.HasPrefix(cleaned, "{") {
+		var wire struct {
+			Title    string          `json:"title"`
+			Summary  string          `json:"summary"`
+			Tags     json.RawMessage `json:"tags"`
+			Markdown string          `json:"markdown"`
 		}
-		if d.Title == "" {
-			d.Title = "Session Summary"
+		if err := json.Unmarshal([]byte(cleaned), &wire); err != nil {
+			return ChatDistill{}, fmt.Errorf("parse chat distill json: %w", err)
 		}
-		d.Summary = strings.TrimSpace(d.Summary)
-		if d.Summary == "" {
-			d.Summary = d.Title
+		md := strings.TrimSpace(wire.Markdown)
+		if md == "" {
+			return ChatDistill{}, errors.New("chat distillation markdown is empty")
 		}
-		d.Tags = normalizeTags(d.Tags)
-		if len(d.Tags) == 0 {
-			d.Tags = []string{"chat"}
+		title := strings.TrimSpace(wire.Title)
+		if title == "" {
+			title = strings.TrimSpace(fallbackTitle)
 		}
-		d.Markdown = strings.TrimSpace(d.Markdown)
-		return d, nil
+		if title == "" {
+			title = "Session Summary"
+		}
+		summary := strings.TrimSpace(wire.Summary)
+		if summary == "" {
+			summary = title
+		}
+		tags := parseFlexibleTags(wire.Tags)
+		if len(tags) == 0 {
+			tags = []string{"chat"}
+		}
+		return ChatDistill{
+			Title:    title,
+			Summary:  summary,
+			Tags:     tags,
+			Markdown: md,
+		}, nil
 	}
 
 	// Accept raw Markdown when the model skips the JSON wrapper.
@@ -424,6 +451,29 @@ func ParseChatDistill(raw, fallbackTitle string) (ChatDistill, error) {
 		Tags:     []string{"chat"},
 		Markdown: md,
 	}, nil
+}
+
+func parseFlexibleTags(raw json.RawMessage) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var list []string
+	if err := json.Unmarshal(raw, &list); err == nil {
+		return normalizeTags(list)
+	}
+	var joined string
+	if err := json.Unmarshal(raw, &joined); err != nil {
+		return nil
+	}
+	replacer := strings.NewReplacer(",", " ", ";", " ", "|", " ")
+	fields := strings.Fields(replacer.Replace(joined))
+	var out []string
+	for _, f := range fields {
+		if trimmed := strings.Trim(f, "-"); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return normalizeTags(out)
 }
 
 func stripMarkdownFence(raw string) string {

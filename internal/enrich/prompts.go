@@ -11,7 +11,7 @@ const (
 	docMetaSystemPrompt = `You summarize technical knowledge documents and output strict JSON only.
 Return one JSON object with keys:
 - "summary": 1 to 2 concise sentences stating the purpose and main decision or finding.
-- "tags": up to 8 lowercase hyphenated tags (languages, tools, systems, hosts).
+- "tags": JSON array of up to 8 lowercase hyphenated strings (for example ["go", "postgres"]).
 - "possible_supersedes": list of {"id": "<doc_id>", "reason": "<short reason>"} ONLY for listed existing documents that this document clearly replaces or updates. Return [] if none.
 Output raw JSON only with no extra commentary.`
 
@@ -21,14 +21,14 @@ Write 1 to 2 short sentences explaining what this section covers within the full
 	noteMetaSystemPrompt = `You summarize a developer memory note and output strict JSON only.
 Return one JSON object with keys:
 - "summary": 1 concise sentence summarizing the fact or rule.
-- "tags": up to 8 lowercase hyphenated tags.
+- "tags": JSON array of up to 8 lowercase hyphenated strings (for example ["go", "postgres"]).
 Output raw JSON only with no extra commentary.`
 
 	chatDistillSystemPrompt = `You distill a developer and AI coding conversation into a concise, reusable knowledge note in strict JSON.
 Return one JSON object with keys:
 - "title": short descriptive title (at most 10 words).
 - "summary": 1 to 2 concise sentences capturing the main decision, fix, or outcome.
-- "tags": up to 8 lowercase hyphenated tags (tools, languages, hosts, components).
+- "tags": JSON array of up to 8 lowercase hyphenated strings (for example ["go", "postgres"]).
 - "markdown": concise Markdown using these sections (omit empty sections):
   ## Context and Goal
   ## Decisions Made

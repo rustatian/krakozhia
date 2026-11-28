@@ -51,6 +51,13 @@ func TestParseDocMeta(t *testing.T) {
 			wantLinks: 0,
 		},
 		{
+			name:      "string tags normalized",
+			raw:       `{"summary":"String tags summary.","tags":"Go, Postgres - pgvector"}`,
+			wantSum:   "String tags summary.",
+			wantTags:  []string{"go", "postgres", "pgvector"},
+			wantLinks: 0,
+		},
+		{
 			name:    "invalid json fails",
 			raw:     "not json at all",
 			wantErr: true,
@@ -349,6 +356,28 @@ func TestParseChatDistill(t *testing.T) {
 			wantTitle: "GPU Setup",
 			wantSum:   "Passed RX 9070 XT through to wodka-3.",
 			wantTags:  []string{"gpu", "talos"},
+		},
+		{
+			name:      "parses hyphen-separated string tags",
+			raw:       `{"title":"Editorial Review","summary":"Checked cost analysis.","tags":"rust - python - cost-analysis - review","markdown":"## Context and Goal\nVerify editorial."}`,
+			fallback:  "Fallback",
+			wantTitle: "Editorial Review",
+			wantSum:   "Checked cost analysis.",
+			wantTags:  []string{"rust", "python", "cost-analysis", "review"},
+		},
+		{
+			name:      "parses space-and-comma-separated string tags",
+			raw:       `{"title":"Fixer Pass","summary":"Fixed claims.","tags":"rust, html python","markdown":"## Changes and Outcomes\nUpdated claims."}`,
+			fallback:  "Fallback",
+			wantTitle: "Fixer Pass",
+			wantSum:   "Fixed claims.",
+			wantTags:  []string{"rust", "html", "python"},
+		},
+		{
+			name:     "malformed json object fails instead of embedding raw json",
+			raw:      `{"title":"Truncated","markdown":"## Context`,
+			fallback: "Fallback",
+			wantErr:  true,
 		},
 		{
 			name:      "falls back to raw markdown when model skips json",
