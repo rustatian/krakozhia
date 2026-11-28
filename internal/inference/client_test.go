@@ -138,10 +138,13 @@ func TestChatAndRerankAndHealth(t *testing.T) {
 			_, _ = w.Write([]byte(`{"status":"ok"}`))
 		case "/v1/chat/completions":
 			var req struct {
-				Model       string  `json:"model"`
-				Temperature float64 `json:"temperature"`
-				MaxTokens   int     `json:"max_tokens"`
-				Messages    []struct {
+				Model          string  `json:"model"`
+				Temperature    float64 `json:"temperature"`
+				MaxTokens      int     `json:"max_tokens"`
+				ResponseFormat *struct {
+					Type string `json:"type"`
+				} `json:"response_format"`
+				Messages []struct {
 					Role    string `json:"role"`
 					Content string `json:"content"`
 				} `json:"messages"`
@@ -151,6 +154,10 @@ func TestChatAndRerankAndHealth(t *testing.T) {
 			}
 			if req.Model != "qwen3-4b-instruct" || req.MaxTokens != 64 || req.Temperature != 0 || len(req.Messages) != 2 {
 				t.Fatalf("unexpected chat payload: %+v", req)
+			}
+			if req.ResponseFormat != nil && req.ResponseFormat.Type == "json_object" {
+				_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"ok\":true}"}}]}`))
+				return
 			}
 			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"  Summary line.  "}}]}`))
 		case "/v1/rerank":
@@ -189,6 +196,13 @@ func TestChatAndRerankAndHealth(t *testing.T) {
 	}
 	if reply != "Summary line." {
 		t.Fatalf("Chat() = %q, want %q", reply, "Summary line.")
+	}
+	jsonReply, err := c.ChatJSON(context.Background(), "sys", "usr", 64)
+	if err != nil {
+		t.Fatalf("ChatJSON() = %v", err)
+	}
+	if jsonReply != `{"ok":true}` {
+		t.Fatalf("ChatJSON() = %q, want %q", jsonReply, `{"ok":true}`)
 	}
 	ranked, err := c.Rerank(context.Background(), "pgvector", []string{"doc a", "doc b"})
 	if err != nil {

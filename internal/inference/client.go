@@ -112,6 +112,15 @@ func (c *Client) embed(ctx context.Context, input string) ([]float32, error) {
 
 // Chat sends a deterministic chat completion request and returns the trimmed reply text.
 func (c *Client) Chat(ctx context.Context, systemPrompt, userPrompt string, maxTokens int) (string, error) {
+	return c.chat(ctx, systemPrompt, userPrompt, maxTokens, false)
+}
+
+// ChatJSON sends a deterministic chat completion request with JSON object grammar enforcement.
+func (c *Client) ChatJSON(ctx context.Context, systemPrompt, userPrompt string, maxTokens int) (string, error) {
+	return c.chat(ctx, systemPrompt, userPrompt, maxTokens, true)
+}
+
+func (c *Client) chat(ctx context.Context, systemPrompt, userPrompt string, maxTokens int, jsonObject bool) (string, error) {
 	if c.chatModel == "" {
 		return "", errors.New("chat model is not configured")
 	}
@@ -119,11 +128,15 @@ func (c *Client) Chat(ctx context.Context, systemPrompt, userPrompt string, maxT
 		Role    string `json:"role"`
 		Content string `json:"content"`
 	}
+	type responseFormat struct {
+		Type string `json:"type"`
+	}
 	req := struct {
-		Model       string  `json:"model"`
-		Temperature float64 `json:"temperature"`
-		MaxTokens   int     `json:"max_tokens,omitempty"`
-		Messages    []msg   `json:"messages"`
+		Model          string          `json:"model"`
+		Temperature    float64         `json:"temperature"`
+		MaxTokens      int             `json:"max_tokens,omitempty"`
+		ResponseFormat *responseFormat `json:"response_format,omitempty"`
+		Messages       []msg           `json:"messages"`
 	}{
 		Model:       c.chatModel,
 		Temperature: 0,
@@ -132,6 +145,9 @@ func (c *Client) Chat(ctx context.Context, systemPrompt, userPrompt string, maxT
 			{Role: "system", Content: systemPrompt},
 			{Role: "user", Content: userPrompt},
 		},
+	}
+	if jsonObject {
+		req.ResponseFormat = &responseFormat{Type: "json_object"}
 	}
 
 	var resp struct {

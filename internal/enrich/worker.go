@@ -22,6 +22,7 @@ import (
 type InferenceClient interface {
 	EmbedDocument(ctx context.Context, text string) ([]float32, error)
 	Chat(ctx context.Context, systemPrompt, userPrompt string, maxTokens int) (string, error)
+	ChatJSON(ctx context.Context, systemPrompt, userPrompt string, maxTokens int) (string, error)
 }
 
 // Config configures an enrichment Worker.
@@ -175,7 +176,7 @@ func (w *Worker) enrichDoc(ctx context.Context, docID string) error {
 		validIDs[p.ID] = true
 	}
 
-	rawMeta, err := w.inf.Chat(ctx, docMetaSystemPrompt, buildDocMetaPrompt(doc, peers), 512)
+	rawMeta, err := w.inf.ChatJSON(ctx, docMetaSystemPrompt, buildDocMetaPrompt(doc, peers), 512)
 	if err != nil {
 		return err
 	}
@@ -230,7 +231,7 @@ func (w *Worker) enrichNote(ctx context.Context, noteID string) error {
 	if err != nil {
 		return err
 	}
-	rawMeta, err := w.inf.Chat(ctx, noteMetaSystemPrompt, buildNoteMetaPrompt(n), 256)
+	rawMeta, err := w.inf.ChatJSON(ctx, noteMetaSystemPrompt, buildNoteMetaPrompt(n), 256)
 	if err != nil {
 		return err
 	}
@@ -260,7 +261,7 @@ func (w *Worker) distillChat(ctx context.Context, chatID string) error {
 		return nil
 	}
 
-	raw, err := w.inf.Chat(ctx, chatDistillSystemPrompt, buildChatDistillPrompt(cs), 1024)
+	raw, err := w.inf.ChatJSON(ctx, chatDistillSystemPrompt, buildChatDistillPrompt(cs), 1024)
 	if err != nil {
 		return err
 	}

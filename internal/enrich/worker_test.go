@@ -126,6 +126,10 @@ func (m *mockInference) EmbedDocument(_ context.Context, _ string) ([]float32, e
 	return v, nil
 }
 
+func (m *mockInference) ChatJSON(ctx context.Context, sys, user string, maxTokens int) (string, error) {
+	return m.Chat(ctx, sys, user, maxTokens)
+}
+
 func (m *mockInference) Chat(_ context.Context, sys, user string, _ int) (string, error) {
 	m.chatCalls++
 	if m.failChat {
